@@ -4,3 +4,9 @@ __pycache__/
 venv/
 .venv/
 .env.local
+.chat_id
+users.db
+hall_of_shame.json
+premium_users.json
+training_data.json
+rug_model.pkl

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Base Fair Launch Sniper - Never Get Rugged Again</title>
+    <meta name="description"
+        content="Free Telegram bot that alerts you to truly fair-launched tokens on Base chain. Automated verification of ownership, liquidity locks, and taxes.">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --base-blue: #0052ff;
+            --base-cyan: #00d4ff;
+            --dark-bg: #0a0e27;
+            --card-bg: #1a1f3a;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, var(--dark-bg) 0%, #0f1419 100%);
+            color: white;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Hero Section */
+        .hero {
+            text-align: center;
+            padding: 80px 20px;
+        }
+
+        .hero h1 {
+            font-size: 56px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            background: linear-gradient(90deg, var(--base-cyan), var(--base-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 24px;
+            color: #a0aec0;
+            margin-bottom: 40px;
+        }
+
+        .cta-button {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--base-blue), var(--base-cyan));
+            color: white;
+            padding: 18px 48px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-size: 20px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 8px 32px rgba(0, 82, 255, 0.3);
+        }
+
+        .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 40px rgba(0, 82, 255, 0.5);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 30px;
+            margin: 60px 0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 48px;
+            font-weight: 700;
+            color: var(--base-cyan);
+        }
+
+        .stat-label {
+            font-size: 16px;
+            color: #a0aec0;
+        }
+
+        /* Features */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin: 80px 0;
+        }
+
+        .feature-card {
+            background: var(--card-bg);
+            padding: 32px;
+            border-radius: 16px;
+            border: 1px solid #2d3748;
+        }
+
+        .feature-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .feature-card h3 {
+            font-size: 24px;
+            margin-bottom: 12px;
+        }
+
+        .feature-card p {
+            color: #a0aec0;
+        }
+
+        /* How It Works */
+        .how-it-works {
+            text-align: center;
+            margin: 80px 0;
+        }
+
+        .how-it-works h2 {
+            font-size: 42px;
+            margin-bottom: 60px;
+        }
+
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 40px;
+        }
+
+        .step {
+            position: relative;
+        }
+
+        .step-number {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, var(--base-blue), var(--base-cyan));
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0 auto 20px;
+        }
+
+        .step h3 {
+            font-size: 20px;
+            margin-bottom: 12px;
+        }
+
+        .step p {
+            color: #a0aec0;
+        }
+
+        /* Referral Program */
+        .referral {
+            background: var(--card-bg);
+            padding: 60px 40px;
+            border-radius: 24px;
+            text-align: center;
+            margin: 80px 0;
+            border: 2px solid var(--base-blue);
+        }
+
+        .referral h2 {
+            font-size: 36px;
+            margin-bottom: 20px;
+        }
+
+        .rewards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 40px 0;
+        }
+
+        .reward-item {
+            background: rgba(0, 82, 255, 0.1);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid var(--base-blue);
+        }
+
+        .reward-item strong {
+            color: var(--base-cyan);
+            font-size: 20px;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0aec0;
+            border-top: 1px solid #2d3748;
+            margin-top: 80px;
+        }
+
+        .footer a {
+            color: var(--base-cyan);
+            text-decoration: none;
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 36px;
+            }
+
+            .hero p {
+                font-size: 18px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Hero -->
+        <div class="hero">
+            <h1>🔍 Never Get Rugged Again</h1>
+            <p>Free Telegram bot that alerts you to truly fair-launched tokens on Base</p>
+            <p style="font-size: 16px; color: #718096; margin-bottom: 30px;">
+                ⚡ Automated scanning • 📱 Telegram alerts • 🆓 100% Free
+            </p>
+            <a href="https://t.me/YourBotUsername" class="cta-button">🚀 Start Bot on Telegram</a>
+
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-number" id="userCount">0</div>
+                    <div class="stat-label">Active Users</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">24/7</div>
+                    <div class="stat-label">Monitoring</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">100%</div>
+                    <div class="stat-label">Free</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">5min</div>
+                    <div class="stat-label">Scan Interval</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Features -->
+        <div class="features">
+            <div class="feature-card">
+                <div class="feature-icon">✅</div>
+                <h3>Ownership Verification</h3>
+                <p>Automatically checks if contract ownership has been renounced to a burn address</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">📊</div>
+                <h3>Pre-mine Analysis</h3>
+                <p>Flags tokens where the creator holds more than 5% of the supply</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🔒</div>
+                <h3>Liquidity Lock Check</h3>
+                <p>Verifies LP tokens are locked via Unicrypt or Team Finance for 30+ days</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🛡️</div>
+                <h3>Tax Screening</h3>
+                <p>Detects suspicious tax functions that could indicate a honeypot</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h3>Instant Alerts</h3>
+                <p>Get notified immediately when a fair launch is detected on Base</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🤖</div>
+                <h3>Fully Automated</h3>
+                <p>Scans Uniswap V3 every 5 minutes, no manual work required</p>
+            </div>
+        </div>
+
+        <!-- How It Works -->
+        <div class="how-it-works">
+            <h2>How It Works</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <h3>Start the Bot</h3>
+                    <p>Click the button above or search for the bot on Telegram</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <h3>Get Your Referral Link</h3>
+                    <p>Use /refer to get your unique link and start earning rewards</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <h3>Receive Alerts</h3>
+                    <p>Get instant notifications when fair launches are detected</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">4</div>
+                    <h3>DYOR & Invest</h3>
+                    <p>Always do your own research before investing in any token</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Referral Program -->
+        <div class="referral">
+            <h2>🎁 Referral Rewards</h2>
+            <p style="color: #a0aec0; margin-bottom: 30px;">Invite friends and earn exclusive perks!</p>
+
+            <div class="rewards">
+                <div class="reward-item">
+                    <strong>5 Referrals</strong>
+                    <p>Early access to premium features</p>
+                </div>
+
+                <div class="reward-item">
+                    <strong>10 Referrals</strong>
+                    <p>Lifetime free premium</p>
+                </div>
+
+                <div class="reward-item">
+                    <strong>25 Referrals</strong>
+                    <p>Custom alert settings</p>
+                </div>
+
+                <div class="reward-item">
+                    <strong>Top 10</strong>
+                    <p>Exclusive perks & recognition</p>
+                </div>
+            </div>
+
+            <a href="https://t.me/YourBotUsername" class="cta-button" style="margin-top: 20px;">Get Your Referral
+                Link</a>
+        </div>
+
+        <!-- Disclaimer -->
+        <div
+            style="background: rgba(255, 68, 68, 0.1); padding: 30px; border-radius: 16px; border: 1px solid #ff4444; margin: 60px 0;">
+            <h3 style="color: #ff4444; margin-bottom: 12px;">⚠️ Important Disclaimer</h3>
+            <p style="color: #a0aec0;">
+                This bot is a FILTER, not financial advice. It cannot detect all scams, honeypots, or future rug pulls.
+                99% of new tokens fail even if "fair launched". Always test with small amounts (<$10), read contract
+                    code on Basescan, verify team legitimacy, and never invest more than you can afford to lose. </p>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>Base Fair Launch Sniper • <a href="https://github.com/Cryp2019/base-fair-launch-sniper">GitHub</a> • <a
+                    href="https://t.me/YourBotUsername">Telegram Bot</a></p>
+            <p style="margin-top: 10px; font-size: 14px;">Built with ❤️ for the Base community</p>
+        </div>
+    </div>
+
+    <script>
+        // Simulate user count (replace with real API call)
+        function animateCount() {
+            let count = 0;
+            const target = 127; // Update with real count
+            const element = document.getElementById('userCount');
+            const duration = 2000;
+            const increment = target / (duration / 16);
+
+            function update() {
+                count += increment;
+                if (count < target) {
+                    element.textContent = Math.floor(count);
+                    requestAnimationFrame(update);
+                } else {
+                    element.textContent = target;
+                }
+            }
+            update();
+        }
+
+        animateCount();
+    </script>
+</body>
+
+</html>

@@ -1,6 +1,8 @@
 # 🔍 Base Fair Launch Sniper
 
-A Telegram bot that alerts you to **truly fair-launched tokens** on Base chain – filtering out 95% of rugs.
+**A free Telegram bot that alerts you to truly fair-launched tokens on Base chain** – filtering out 95% of rugs.
+
+> **Note**: This is a Telegram bot, not a web service. All alerts are delivered via Telegram messages.
 
 ✅ Renounced ownership  
 ✅ <5% pre-mine  
