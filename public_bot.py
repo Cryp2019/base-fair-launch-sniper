@@ -245,7 +245,7 @@ async def upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ===== MAIN =====
-async def main():
+def main():
     if not TELEGRAM_TOKEN:
         logging.error("Missing TELEGRAM_BOT_TOKEN in .env")
         return
@@ -268,11 +268,8 @@ async def main():
     logging.info("💬 Send /start in Telegram to test")
     logging.info("Press Ctrl+C to stop")
     
-    # Start polling
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start polling (blocking call)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("\n👋 Bot stopped by user")
+    main()
