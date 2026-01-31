@@ -2,4 +2,4 @@ python-telegram-bot==21.9
 web3==7.6.0
 python-dotenv==1.0.1
 requests==2.32.3
-eth-account==0.10.0
+eth-account>=0.13.1

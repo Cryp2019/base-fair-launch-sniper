@@ -1593,7 +1593,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin panel (admin only)"""
     user = update.effective_user
 
-    if not admin_manager.is_admin(user.id):
+    if not admin_manager.is_admin(user.id, user.username):
         await update.message.reply_text("❌ Access denied. Admin only.")
         return
 
@@ -1648,7 +1648,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     user = query.from_user
 
-    if not admin_manager.is_admin(user.id):
+    if not admin_manager.is_admin(user.id, user.username):
         await query.answer("❌ Access denied. Admin only.", show_alert=True)
         return
 
@@ -1727,7 +1727,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle admin callbacks
     if query.data.startswith('admin_'):
-        if not admin_manager.is_admin(query.from_user.id):
+        if not admin_manager.is_admin(query.from_user.id, query.from_user.username):
             await query.answer("❌ Access denied. Admin only.", show_alert=True)
             return
 

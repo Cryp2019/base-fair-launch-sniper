@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Admin configuration
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', '')  # Set this in Railway
+ADMIN_USERNAMES = ['cccryp']  # Usernames with admin access (without @)
 TRADING_FEE_PERCENTAGE = float(os.getenv('TRADING_FEE_PERCENTAGE', '0.5'))  # Default 0.5%
 
 
@@ -25,9 +26,17 @@ class AdminManager:
         self.payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS', '')
         self.fee_wallet = os.getenv('FEE_COLLECTION_WALLET', self.payment_wallet)  # Can be different
     
-    def is_admin(self, user_id: int) -> bool:
-        """Check if user is admin"""
-        return str(user_id) == str(self.admin_id)
+    def is_admin(self, user_id: int, username: str = None) -> bool:
+        """Check if user is admin by ID or username"""
+        # Check by user ID
+        if str(user_id) == str(self.admin_id):
+            return True
+
+        # Check by username
+        if username and username.lower() in [u.lower() for u in ADMIN_USERNAMES]:
+            return True
+
+        return False
     
     def calculate_trading_fee(self, eth_amount: float) -> Dict:
         """Calculate trading fee from ETH amount"""
