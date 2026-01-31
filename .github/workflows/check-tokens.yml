@@ -1,8 +1,9 @@
-name: Fair Launch Sniper
+name: Fair Launch Sniper (DISABLED - Using sniper_bot.py locally instead)
 on:
-  schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
-  workflow_dispatch:  # Manual trigger
+  # DISABLED: Uncomment to re-enable
+  # schedule:
+  #   - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   scan:
