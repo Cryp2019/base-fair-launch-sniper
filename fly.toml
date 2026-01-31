@@ -1,0 +1,19 @@
+# fly.toml app configuration file
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = "base-sniper-bot"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "8080"
+
+[processes]
+  app = "python sniper_bot.py"
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
