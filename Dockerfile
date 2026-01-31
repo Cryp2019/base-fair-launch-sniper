@@ -11,6 +11,7 @@ COPY sniper_bot.py .
 COPY database.py .
 COPY trading.py .
 COPY security_scanner.py .
+COPY admin.py .
 
 # Create directory for database
 RUN mkdir -p /app/data

@@ -123,7 +123,7 @@ class TradingBot:
                 'message': str(e)
             }
     
-    def buy_token(self, token_address: str, private_key: str, eth_amount: float, slippage: float = 10.0) -> dict:
+    def buy_token(self, token_address: str, private_key: str, eth_amount: float, slippage: float = 10.0, fee_wallet: str = None, fee_percentage: float = 0.0) -> dict:
         """
         Buy token with ETH via Uniswap V3
         
@@ -140,9 +140,36 @@ class TradingBot:
             account = Account.from_key(private_key)
             token_checksum = Web3.to_checksum_address(token_address)
             weth_checksum = Web3.to_checksum_address(WETH_ADDRESS)
-            
-            # Convert ETH amount to Wei
-            amount_in = self.w3.to_wei(eth_amount, 'ether')
+
+            # Calculate fee if applicable
+            fee_amount_eth = 0
+            net_eth_amount = eth_amount
+
+            if fee_wallet and fee_percentage > 0:
+                fee_amount_eth = eth_amount * (fee_percentage / 100)
+                net_eth_amount = eth_amount - fee_amount_eth
+
+                # Send fee to fee wallet
+                try:
+                    fee_amount_wei = self.w3.to_wei(fee_amount_eth, 'ether')
+                    fee_tx = {
+                        'from': account.address,
+                        'to': Web3.to_checksum_address(fee_wallet),
+                        'value': fee_amount_wei,
+                        'gas': 21000,
+                        'gasPrice': self.w3.eth.gas_price,
+                        'nonce': self.w3.eth.get_transaction_count(account.address),
+                        'chainId': 8453
+                    }
+                    signed_fee_tx = self.w3.eth.account.sign_transaction(fee_tx, private_key)
+                    fee_tx_hash = self.w3.eth.send_raw_transaction(signed_fee_tx.rawTransaction)
+                    logger.info(f"💰 Fee collected: {fee_amount_eth} ETH - TX: {fee_tx_hash.hex()}")
+                except Exception as e:
+                    logger.error(f"Fee collection failed: {e}")
+                    # Continue with trade even if fee fails
+
+            # Convert net ETH amount to Wei
+            amount_in = self.w3.to_wei(net_eth_amount, 'ether')
             
             # Calculate minimum output with slippage (set to 0 for now, will calculate properly)
             amount_out_minimum = 0  # We'll accept any amount (high slippage tolerance)

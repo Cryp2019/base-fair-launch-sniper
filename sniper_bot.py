@@ -16,6 +16,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from database import UserDatabase
 from trading import TradingBot
 from security_scanner import SecurityScanner
+from admin import AdminManager
 
 # Load environment variables
 if os.path.exists('.env'):
@@ -42,6 +43,7 @@ db = UserDatabase()
 w3 = Web3(Web3.HTTPProvider(BASE_RPC))
 trading_bot = TradingBot(w3)
 security_scanner = SecurityScanner(w3)
+admin_manager = AdminManager(db, w3)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1430,8 +1432,14 @@ async def handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, eth_amo
         parse_mode='Markdown'
     )
 
-    # Execute buy
-    result = trading_bot.buy_token(token_address, private_key, eth_amount)
+    # Execute buy with fee
+    result = trading_bot.buy_token(
+        token_address,
+        private_key,
+        eth_amount,
+        fee_wallet=admin_manager.fee_wallet,
+        fee_percentage=admin_manager.fee_percentage
+    )
 
     if result['success']:
         msg = (
@@ -1581,6 +1589,115 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE, tok
 
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel (admin only)"""
+    user = update.effective_user
+
+    if not admin_manager.is_admin(user.id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+
+    stats = admin_manager.get_admin_stats()
+
+    msg = (
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃                                                    ┃\n"
+        f"┃      👑 *ADMIN PANEL*         ┃\n"
+        f"┃                                                    ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  📊 *USER STATS*     │\n"
+        f"└─────────────────────┘\n\n"
+        f"Total Users: *{stats.get('total_users', 0):,}*\n"
+        f"Premium Users: *{stats.get('premium_users', 0):,}*\n"
+        f"Free Users: *{stats.get('free_users', 0):,}*\n"
+        f"Total Referrals: *{stats.get('total_referrals', 0):,}*\n"
+        f"Total Wallets: *{stats.get('total_wallets', 0):,}*\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  💰 *FEE SETTINGS*   │\n"
+        f"└─────────────────────┘\n\n"
+        f"Trading Fee: *{stats.get('current_fee_percentage', 0)}%*\n"
+        f"Fees Collected: *{stats.get('total_fees_collected', 0):.6f} ETH*\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  💳 *WALLETS*        │\n"
+        f"└─────────────────────┘\n\n"
+        f"Payment Wallet:\n`{stats.get('payment_wallet', 'Not set')}`\n\n"
+        f"Fee Collection Wallet:\n`{stats.get('fee_wallet', 'Not set')}`\n\n"
+        f"Use the buttons below to manage:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("💳 Update Payment Address", callback_data="admin_update_payment"),
+            InlineKeyboardButton("💰 Update Fee %", callback_data="admin_update_fee")
+        ],
+        [
+            InlineKeyboardButton("👑 Grant Premium", callback_data="admin_grant_premium"),
+            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")
+        ],
+        [
+            InlineKeyboardButton("📊 Refresh Stats", callback_data="admin_panel"),
+            InlineKeyboardButton("« Back to Menu", callback_data="menu")
+        ]
+    ]
+
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel via callback"""
+    query = update.callback_query
+    user = query.from_user
+
+    if not admin_manager.is_admin(user.id):
+        await query.answer("❌ Access denied. Admin only.", show_alert=True)
+        return
+
+    stats = admin_manager.get_admin_stats()
+
+    msg = (
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃                                                    ┃\n"
+        f"┃      👑 *ADMIN PANEL*         ┃\n"
+        f"┃                                                    ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  📊 *USER STATS*     │\n"
+        f"└─────────────────────┘\n\n"
+        f"Total Users: *{stats.get('total_users', 0):,}*\n"
+        f"Premium Users: *{stats.get('premium_users', 0):,}*\n"
+        f"Free Users: *{stats.get('free_users', 0):,}*\n"
+        f"Total Referrals: *{stats.get('total_referrals', 0):,}*\n"
+        f"Total Wallets: *{stats.get('total_wallets', 0):,}*\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  💰 *FEE SETTINGS*   │\n"
+        f"└─────────────────────┘\n\n"
+        f"Trading Fee: *{stats.get('current_fee_percentage', 0)}%*\n"
+        f"Fees Collected: *{stats.get('total_fees_collected', 0):.6f} ETH*\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  💳 *WALLETS*        │\n"
+        f"└─────────────────────┘\n\n"
+        f"Payment Wallet:\n`{stats.get('payment_wallet', 'Not set')}`\n\n"
+        f"Fee Collection Wallet:\n`{stats.get('fee_wallet', 'Not set')}`\n\n"
+        f"Use the buttons below to manage:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("💳 Update Payment Address", callback_data="admin_update_payment"),
+            InlineKeyboardButton("💰 Update Fee %", callback_data="admin_update_fee")
+        ],
+        [
+            InlineKeyboardButton("👑 Grant Premium", callback_data="admin_grant_premium"),
+            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")
+        ],
+        [
+            InlineKeyboardButton("📊 Refresh Stats", callback_data="admin_panel"),
+            InlineKeyboardButton("« Back to Menu", callback_data="menu")
+        ]
+    ]
+
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route callbacks"""
     query = update.callback_query
@@ -1607,6 +1724,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_address = query.data.replace('approve_', '')
         await handle_approve(update, context, token_address)
         return
+
+    # Handle admin callbacks
+    if query.data.startswith('admin_'):
+        if not admin_manager.is_admin(query.from_user.id):
+            await query.answer("❌ Access denied. Admin only.", show_alert=True)
+            return
+
+        if query.data == 'admin_panel':
+            await admin_panel_callback(update, context)
+            return
+        elif query.data == 'admin_update_payment':
+            await query.answer("Send new payment address in format:\n/setpayment 0x...", show_alert=True)
+            return
+        elif query.data == 'admin_update_fee':
+            await query.answer("Send new fee % in format:\n/setfee 0.5", show_alert=True)
+            return
+        elif query.data == 'admin_grant_premium':
+            await query.answer("Send user ID in format:\n/grantpremium 123456789", show_alert=True)
+            return
+        elif query.data == 'admin_broadcast':
+            await query.answer("Send broadcast message in format:\n/broadcast Your message here", show_alert=True)
+            return
 
     handlers = {
         'menu': menu,
@@ -1712,6 +1851,7 @@ async def main():
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
