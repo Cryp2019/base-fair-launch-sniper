@@ -17,6 +17,19 @@ from telegram.ext import Application, CommandHandler, CallbackContext
 import requests
 from eth_abi import encode
 
+# Load .env file FIRST before any config
+try:
+    with open('.env', 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                if '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        os.environ[parts[0].strip()] = parts[1].strip()
+except FileNotFoundError:
+    pass
+
 # ===== CONFIG =====
 BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}"
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -25,6 +38,7 @@ ALERT_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '@base_fair_launch_alerts')  # Pub
 # Uniswap V3 Factory (Base)
 FACTORY_ADDRESS = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
+WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()  # Wrapped ETH on Base
 
 # Critical thresholds
 MAX_PREMINE_RATIO = 0.05  # 5% max creator holding
@@ -62,8 +76,19 @@ def is_renounced(owner_address: str) -> bool:
     return owner_address.lower() in [a.lower() for a in burn_addresses]
 
 def get_creator_address(token_address: str) -> str:
-    """Get deployer address via Alchemy Transfers API (free tier)"""
+    """Get deployer address with improved reliability"""
     try:
+        # Method 1: Try to get contract creation transaction via Basescan API
+        basescan_key = os.getenv('BASESCAN_API_KEY', '')
+        if basescan_key:
+            url = f"https://api.basescan.org/api?module=contract&action=getcontractcreation&contractaddresses={token_address}&apikey={basescan_key}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == '1' and data.get('result'):
+                    return data['result'][0]['contractCreator']
+        
+        # Method 2: Fallback to Alchemy transfers (original method)
         url = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}/getAssetTransfers"
         payload = {
             "fromBlock": "0x0",
@@ -72,67 +97,178 @@ def get_creator_address(token_address: str) -> str:
             "category": ["external", "erc20"],
             "withMetadata": True,
             "excludeZeroValue": True,
-            "maxCount": "0x1"
+            "maxCount": "0x5"  # Get first 5 to find earliest
         }
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('transfers'):
-                return data['transfers'][0]['from']
+            transfers = data.get('transfers', [])
+            if transfers:
+                # Return the earliest transfer's sender
+                return transfers[-1]['from']
     except Exception as e:
         logging.warning(f"Failed to get creator: {e}")
     return None
 
-def check_taxes(token_address: str, router_address: str = "0x4752ba91c688666f916f9222f86e88396465188c") -> dict:
-    """Basic tax check via simulation (simplified for free tier)"""
+def check_honeypot(token_address: str, pair_address: str = None) -> dict:
+    """Check for honeypot using Honeypot.is API and on-chain checks"""
+    result = {
+        'is_honeypot': False,
+        'honeypot_reason': None,
+        'buy_tax': 0,
+        'sell_tax': 0,
+        'transfer_tax': 0
+    }
+    
     try:
-        # Note: Full tax simulation requires complex contract interactions
-        # This MVP checks common tax function signatures
+        # Use Honeypot.is API (free tier: 100 requests/day)
+        url = f"https://api.honeypot.is/v2/IsHoneypot?address={token_address}&chainID=8453"  # Base chain ID
+        resp = requests.get(url, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('honeypotResult'):
+                hp_result = data['honeypotResult']
+                result['is_honeypot'] = hp_result.get('isHoneypot', False)
+                
+                # Extract tax information
+                if 'simulationResult' in data:
+                    sim = data['simulationResult']
+                    result['buy_tax'] = sim.get('buyTax', 0)
+                    result['sell_tax'] = sim.get('sellTax', 0)
+                    result['transfer_tax'] = sim.get('transferTax', 0)
+                
+                if result['is_honeypot']:
+                    result['honeypot_reason'] = hp_result.get('honeypotReason', 'Unknown')
+                    logging.warning(f"Honeypot detected: {token_address} - {result['honeypot_reason']}")
+                    return result
+    except Exception as e:
+        logging.warning(f"Honeypot.is API failed: {e}, falling back to on-chain checks")
+    
+    # Fallback: On-chain checks for suspicious functions
+    try:
         contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
         
         # Check for common tax-related functions
-        has_tax_functions = False
+        suspicious_functions = ['taxFee', 'buyTax', 'sellTax', 'transferTax', 'setMaxTxAmount', 'blacklist', 'pause']
+        found_suspicious = []
+        
+        for func in suspicious_functions:
+            if hasattr(contract.functions, func):
+                found_suspicious.append(func)
+        
+        if found_suspicious:
+            result['is_honeypot'] = True
+            result['honeypot_reason'] = f"Suspicious functions: {', '.join(found_suspicious)}"
+            logging.warning(f"Suspicious functions found in {token_address}: {found_suspicious}")
+    except Exception as e:
+        logging.warning(f"On-chain honeypot check failed: {e}")
+    
+    return result
+
+def check_taxes(token_address: str, pair_address: str = None) -> dict:
+    """Enhanced tax check with honeypot detection"""
+    # Use honeypot detection which includes tax information
+    honeypot_result = check_honeypot(token_address, pair_address)
+    
+    return {
+        'has_suspicious_functions': honeypot_result['is_honeypot'],
+        'buy_tax': honeypot_result['buy_tax'],
+        'sell_tax': honeypot_result['sell_tax'],
+        'transfer_tax': honeypot_result.get('transfer_tax', 0),
+        'is_honeypot': honeypot_result['is_honeypot'],
+        'honeypot_reason': honeypot_result.get('honeypot_reason')
+    }
+
+def get_lock_duration(locker_address: str, token_address: str) -> int:
+    """Get actual lock duration from locker contract"""
+    try:
+        # Unicrypt V2 ABI for getting lock info
+        unicrypt_abi = [
+            {"constant":True,"inputs":[{"name":"_lpToken","type":"address"}],"name":"getNumLocksForToken","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+            {"constant":True,"inputs":[{"name":"_lpToken","type":"address"},{"name":"_index","type":"uint256"}],"name":"tokenLocks","outputs":[{"name":"unlockDate","type":"uint256"}],"type":"function"}
+        ]
+        
+        locker_contract = w3.eth.contract(address=locker_address, abi=unicrypt_abi)
+        
+        # Try to get lock count
         try:
-            # Try common tax getter functions
-            for func in ['taxFee', 'buyTax', 'sellTax', 'transferTax']:
-                if hasattr(contract.functions, func):
-                    has_tax_functions = True
-                    break
+            num_locks = locker_contract.functions.getNumLocksForToken(token_address).call()
+            if num_locks > 0:
+                # Get the first lock's unlock date
+                lock_info = locker_contract.functions.tokenLocks(token_address, 0).call()
+                unlock_timestamp = lock_info if isinstance(lock_info, int) else lock_info[0]
+                
+                # Calculate days remaining
+                current_time = int(time.time())
+                days_remaining = max(0, (unlock_timestamp - current_time) // 86400)
+                return days_remaining
         except:
             pass
-            
-        return {
-            'has_suspicious_functions': has_tax_functions,
-            'buy_tax': 0,
-            'sell_tax': 0,
-            'is_honeypot': False  # Full honeypot detection requires paid services
-        }
     except Exception as e:
-        logging.warning(f"Tax check failed: {e}")
-        return {'has_suspicious_functions': True, 'buy_tax': 0, 'sell_tax': 0, 'is_honeypot': False}
+        logging.debug(f"Failed to get lock duration: {e}")
+    
+    return 0
 
 def is_liquidity_locked(pair_address: str) -> dict:
-    """Check if LP tokens locked via common lockers (Unicrypt/Team Finance)"""
-    # Simplified: Check if LP tokens held by known locker contracts
-    locker_contracts = [
-        "0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214",  # Unicrypt
-        "0x35970d815e4f857f7c829c8b78e1964d15f3e674",  # Team Finance
-    ]
+    """Check if LP tokens locked via common lockers - FIXED VERSION"""
+    # Known locker contracts on Base (update with Base-specific addresses)
+    locker_contracts = {
+        "0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214": "Unicrypt",
+        "0x35970d815e4f857f7c829c8b78e1964d15f3e674": "Team Finance",
+        "0x71B5759d73262FBb223956913ecF4ecC51057641": "PinkLock",
+    }
     
     try:
-        pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_POOL_ABI)
-        token0 = pair_contract.functions.token0().call()
-        token1 = pair_contract.functions.token1().call()
+        # For Uniswap V3, the pair address IS the LP token
+        # Create LP token contract to check balances
+        lp_token_abi = [
+            {"constant":True,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},
+            {"constant":True,"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+        ]
         
-        # LP token is the pair address itself for Uniswap V2 style
-        for locker in locker_contracts:
-            balance = w3.eth.get_balance(locker)  # Simplified - real check needs LP token balance
-            if balance > 0:
-                return {'locked': True, 'locker': locker, 'days': 90}  # Assume 90 days
-    except:
-        pass
+        lp_contract = w3.eth.contract(address=pair_address, abi=lp_token_abi)
+        
+        try:
+            total_supply = lp_contract.functions.totalSupply().call()
+        except:
+            # If totalSupply fails, might be Uniswap V3 which doesn't have LP tokens
+            logging.debug(f"Could not get total supply for {pair_address}, might be V3 pool")
+            return {'locked': False, 'locker': None, 'days': 0, 'reason': 'Not a standard LP token'}
+        
+        # Check each locker contract for LP token balance
+        for locker_addr, locker_name in locker_contracts.items():
+            try:
+                balance = lp_contract.functions.balanceOf(locker_addr).call()
+                
+                if balance > 0:
+                    # Calculate percentage locked
+                    percent_locked = (balance / total_supply * 100) if total_supply > 0 else 0
+                    
+                    # Only consider it locked if >50% of LP is in locker
+                    if percent_locked >= 50:
+                        # Try to get actual lock duration
+                        days = get_lock_duration(locker_addr, pair_address)
+                        
+                        # If we can't get duration, assume minimum lock period
+                        if days == 0:
+                            days = 30  # Conservative estimate
+                        
+                        logging.info(f"Found {percent_locked:.1f}% LP locked in {locker_name} for {days} days")
+                        return {
+                            'locked': True,
+                            'locker': locker_addr,
+                            'locker_name': locker_name,
+                            'days': days,
+                            'percent_locked': round(percent_locked, 2)
+                        }
+            except Exception as e:
+                logging.debug(f"Error checking {locker_name}: {e}")
+                continue
+    except Exception as e:
+        logging.warning(f"Liquidity lock check failed for {pair_address}: {e}")
     
-    return {'locked': False, 'locker': None, 'days': 0}
+    return {'locked': False, 'locker': None, 'days': 0, 'percent_locked': 0}
 
 def analyze_new_pair(pair_address: str) -> dict:
     """Full fair launch analysis"""
@@ -141,9 +277,13 @@ def analyze_new_pair(pair_address: str) -> dict:
         token0 = pair_contract.functions.token0().call().lower()
         token1 = pair_contract.functions.token1().call().lower()
         
-        # Identify new token (non-USDC)
-        new_token = token0 if token1 == USDC_ADDRESS else token1
-        if new_token == USDC_ADDRESS:
+        # Identify new token (non-USDC and non-WETH)
+        if token0 == USDC_ADDRESS or token0 == WETH_ADDRESS:
+            new_token = token1
+        elif token1 == USDC_ADDRESS or token1 == WETH_ADDRESS:
+            new_token = token0
+        else:
+            # Neither token is USDC or WETH, skip this pair
             return None
         
         # Get token details
@@ -172,15 +312,17 @@ def analyze_new_pair(pair_address: str) -> dict:
                 pass
         premine_ratio = creator_balance / total_supply if total_supply > 0 else 1.0
         
-        tax_info = check_taxes(new_token)
+        tax_info = check_taxes(new_token, pair_address)
         lock_info = is_liquidity_locked(pair_address)
         
-        # Fair launch criteria
+        # Fair launch criteria - now includes honeypot check and tax thresholds
         is_fair = (
             renounced and
             premine_ratio <= MAX_PREMINE_RATIO and
             lock_info['locked'] and lock_info['days'] >= MIN_LIQUIDITY_LOCK_DAYS and
-            not tax_info['has_suspicious_functions']
+            not tax_info['is_honeypot'] and
+            tax_info['buy_tax'] <= MAX_TAX_PERCENT and
+            tax_info['sell_tax'] <= MAX_TAX_PERCENT
         )
         
         return {
@@ -193,7 +335,14 @@ def analyze_new_pair(pair_address: str) -> dict:
             'premine_ratio': round(premine_ratio * 100, 2),
             'liquidity_locked': lock_info['locked'],
             'lock_days': lock_info['days'],
+            'lock_percent': lock_info.get('percent_locked', 0),
+            'locker_name': lock_info.get('locker_name', 'Unknown'),
             'has_suspicious_tax': tax_info['has_suspicious_functions'],
+            'is_honeypot': tax_info['is_honeypot'],
+            'honeypot_reason': tax_info.get('honeypot_reason'),
+            'buy_tax': tax_info['buy_tax'],
+            'sell_tax': tax_info['sell_tax'],
+            'transfer_tax': tax_info.get('transfer_tax', 0),
             'timestamp': datetime.utcnow().isoformat()
         }
         
@@ -202,45 +351,116 @@ def analyze_new_pair(pair_address: str) -> dict:
         return None
 
 def get_new_pairs(last_block: int = None) -> list:
-    """Get new Uniswap V3 pairs from last 10 blocks"""
+    """Get new Uniswap V3 pairs - FIXED to properly decode PoolCreated events"""
     if last_block is None:
         last_block = w3.eth.block_number - 10
     
-    # Simplified: Query Alchemy for PoolCreated events
-    url = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}/v2/base-mainnet/asset-transfers"
-    params = {
-        'contractAddresses[]': [FACTORY_ADDRESS],
-        'category[]': ['external'],
-        'withMetadata': 'true',
-        'fromBlock': hex(last_block),
-        'toBlock': 'latest',
-        'maxCount': '0xa'  # 10 results
-    }
+    # PoolCreated event signature: PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)
+    pool_created_topic = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
     
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Extract pool addresses from logs (simplified)
-            # In production: decode PoolCreated event logs properly
-            pools = []
-            for transfer in data.get('transfers', []):
-                if transfer.get('to') and transfer['to'].lower() != FACTORY_ADDRESS.lower():
-                    pools.append(transfer['to'])
-            return pools[:5]  # Limit to 5 newest
+        # Use eth_getLogs to get PoolCreated events
+        logs = w3.eth.get_logs({
+            'fromBlock': last_block,
+            'toBlock': 'latest',
+            'address': FACTORY_ADDRESS,
+            'topics': [pool_created_topic]
+        })
+        
+        pools = []
+        for log in logs:
+            try:
+                # Decode the event
+                # topics[0] = event signature
+                # topics[1] = token0 (indexed)
+                # topics[2] = token1 (indexed)
+                # topics[3] = fee (indexed)
+                # data = tickSpacing + pool address
+                
+                if len(log['topics']) >= 4:
+                    token0 = '0x' + log['topics'][1].hex()[-40:]
+                    token1 = '0x' + log['topics'][2].hex()[-40:]
+                    
+                    # Pool address is in the data field (last 20 bytes)
+                    pool_address = '0x' + log['data'].hex()[-40:]
+                    
+                    # Include pairs with USDC or WETH
+                    if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS or
+                        token0.lower() == WETH_ADDRESS or token1.lower() == WETH_ADDRESS):
+                        
+                        # Determine pair type
+                        pair_type = "USDC" if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS) else "WETH"
+                        
+                        pools.append({
+                            'address': pool_address,
+                            'token0': token0,
+                            'token1': token1,
+                            'block': log['blockNumber'],
+                            'pair_type': pair_type
+                        })
+                        logging.info(f"Found new {pair_type} pair: {pool_address} at block {log['blockNumber']}")
+            except Exception as e:
+                logging.warning(f"Failed to decode log: {e}")
+                continue
+        
+        # Return just the addresses, sorted by block number (newest first)
+        pools.sort(key=lambda x: x['block'], reverse=True)
+        return [p['address'] for p in pools[:5]]  # Limit to 5 newest
+        
     except Exception as e:
         logging.error(f"Failed to fetch pairs: {e}")
+        
+        # Fallback to simpler method if eth_getLogs fails
+        try:
+            logging.info("Falling back to Alchemy asset transfers...")
+            url = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}"
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_getLogs",
+                "params": [{
+                    "fromBlock": hex(last_block),
+                    "toBlock": "latest",
+                    "address": FACTORY_ADDRESS,
+                    "topics": [pool_created_topic]
+                }]
+            }
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if 'result' in data:
+                    return [log['data'][-40:] for log in data['result'][:5]]
+        except Exception as fallback_error:
+            logging.error(f"Fallback also failed: {fallback_error}")
     
     return []
 
 async def send_alert(context: CallbackContext, analysis: dict):
-    """Send Telegram alert with analysis"""
+    """Send Telegram alert with enhanced analysis information"""
     if not TELEGRAM_TOKEN or not ALERT_CHAT_ID:
         logging.error("Missing Telegram config")
         return
     
-    # Build alert message
+    # Build alert message with enhanced information
     status_emoji = "✅" if analysis['is_fair'] else "⚠️"
+    
+    # Build tax info string
+    tax_info = ""
+    if analysis.get('buy_tax', 0) > 0 or analysis.get('sell_tax', 0) > 0:
+        tax_info = f"\n💸 Buy Tax: {analysis['buy_tax']}% | Sell Tax: {analysis['sell_tax']}%"
+    
+    # Build honeypot warning
+    honeypot_warning = ""
+    if analysis.get('is_honeypot'):
+        honeypot_warning = f"\n🚨 *HONEYPOT DETECTED*: {analysis.get('honeypot_reason', 'Unknown reason')}"
+    
+    # Build lock info
+    lock_info = f"{analysis['lock_days']} days"
+    if analysis.get('lock_percent', 0) > 0:
+        lock_info += f", {analysis['lock_percent']}% locked"
+    if analysis.get('locker_name'):
+        lock_info += f" via {analysis['locker_name']}"
+    
     message = (
         f"{status_emoji} *NEW TOKEN DETECTED* {status_emoji}\n\n"
         f"🔤 *{analysis['name']}* (${analysis['symbol'].upper()})\n"
@@ -249,12 +469,14 @@ async def send_alert(context: CallbackContext, analysis: dict):
         f"🛡️ *Fair Launch Checks:*\n"
         f"{'✅' if analysis['renounced'] else '❌'} Ownership renounced\n"
         f"{'✅' if analysis['premine_ratio'] <= 5 else '❌'} Creator holding: {analysis['premine_ratio']}%\n"
-        f"{'✅' if analysis['liquidity_locked'] else '❌'} Liquidity locked ({analysis['lock_days']} days)\n"
-        f"{'✅' if not analysis['has_suspicious_tax'] else '❌'} No suspicious tax functions\n\n"
+        f"{'✅' if analysis['liquidity_locked'] else '❌'} Liquidity locked ({lock_info})\n"
+        f"{'✅' if not analysis['is_honeypot'] and analysis['buy_tax'] <= MAX_TAX_PERCENT else '❌'} "
+        f"Tax check passed{tax_info}\n"
+        f"{honeypot_warning}\n\n"
         f"⚠️ *DISCLAIMER: Not financial advice. 99% of new tokens fail. DYOR.*"
     )
     
-    # Add Etherscan links
+    # Add Basescan links
     keyboard = [
         [
             InlineKeyboardButton("🔍 Token", url=f"https://basescan.org/token/{analysis['token_address']}"),
@@ -322,17 +544,10 @@ async def scan_command(update: Update, context: CallbackContext):
         await update.message.reply_text("No new pairs found in last 10 blocks.")
 
 # ===== MAIN =====
-def setup_secrets():
-    """Load secrets from .env if exists"""
-    if os.path.exists('.env'):
-        with open('.env') as f:
-            for line in f:
-                if line.strip() and not line.startswith('#'):
-                    key, value = line.strip().split('=', 1)
-                    os.environ[key] = value
-
 async def main():
-    setup_secrets()
+    # Debug: Print loaded env vars
+    logging.info(f"Telegram Token loaded: {'Yes' if TELEGRAM_TOKEN else 'No'}")
+    logging.info(f"Alchemy Key loaded: {'Yes' if os.getenv('ALCHEMY_BASE_KEY') else 'No'}")
     
     # Scan-only mode (for GitHub Actions)
     if '--scan-only' in sys.argv:
@@ -344,10 +559,11 @@ async def main():
             analysis = analyze_new_pair(pair)
             if analysis and analysis['is_fair']:
                 # Minimal bot setup just for sending alerts
-                from telegram.ext import Application
-                app = Application.builder().token(TELEGRAM_TOKEN).build()
-                await send_alert(app, analysis)
-                new_finds += 1
+                if TELEGRAM_TOKEN:
+                    from telegram.ext import Application
+                    app = Application.builder().token(TELEGRAM_TOKEN).build()
+                    await send_alert(app, analysis)
+                    new_finds += 1
         
         logging.info(f"Scan complete. Found {new_finds} fair launches.")
         return
@@ -355,21 +571,31 @@ async def main():
     # Full bot mode
     if not TELEGRAM_TOKEN:
         logging.error("Missing TELEGRAM_BOT_TOKEN in .env")
+        logging.error("Please add TELEGRAM_BOT_TOKEN=your_token_here to .env file")
         return
     
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("howitworks", howitworks))
-    app.add_handler(CommandHandler("scan", scan_command))
-    
-    logging.info("Bot started. Press Ctrl+C to stop.")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    
-    # Keep running
-    while True:
-        await asyncio.sleep(60)
+    try:
+        logging.info("Initializing Telegram bot...")
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("howitworks", howitworks))
+        app.add_handler(CommandHandler("scan", scan_command))
+        
+        logging.info("Bot started. Press Ctrl+C to stop.")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        
+        logging.info("Bot is now running and monitoring for fair launches...")
+        
+        # Keep running
+        while True:
+            await asyncio.sleep(60)
+    except Exception as e:
+        logging.error(f"Bot error: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == '__main__':
     import asyncio
