@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY sniper_bot.py .
 COPY database.py .
 COPY trading.py .
+COPY security_scanner.py .
 
 # Create directory for database
 RUN mkdir -p /app/data

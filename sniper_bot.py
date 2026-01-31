@@ -15,6 +15,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from database import UserDatabase
 from trading import TradingBot
+from security_scanner import SecurityScanner
 
 # Load environment variables
 if os.path.exists('.env'):
@@ -40,6 +41,7 @@ WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
 db = UserDatabase()
 w3 = Web3(Web3.HTTPProvider(BASE_RPC))
 trading_bot = TradingBot(w3)
+security_scanner = SecurityScanner(w3)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1147,6 +1149,16 @@ async def handle_snipe_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         estimated_gas = 200000  # Typical swap gas
         gas_cost_eth = w3.from_wei(gas_price * estimated_gas, 'ether')
 
+        # Run security scan
+        await snipe_msg.edit_text(
+            "🎯 *PREPARING SNIPE...*\n\n"
+            "🛡️ Running security scan...",
+            parse_mode='Markdown'
+        )
+
+        security_results = security_scanner.scan_token(token_address_checksum)
+        security_report = security_scanner.format_security_report(security_results)
+
         # Get wallet balance
         eth_balance_data = trading_bot.get_eth_balance(wallet_address)
         eth_balance = eth_balance_data.get('balance_eth', 0) if eth_balance_data['success'] else 0
@@ -1159,7 +1171,7 @@ async def handle_snipe_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data['current_token'] = token_address_checksum
         context.user_data['current_token_symbol'] = symbol
 
-        # Build snipe summary
+        # Build snipe summary with security report
         msg = (
             f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
             f"┃                                                    ┃\n"
@@ -1173,6 +1185,7 @@ async def handle_snipe_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"Symbol: *${symbol}*\n"
             f"Decimals: {decimals}\n"
             f"Ownership: {'✅ Renounced' if is_renounced else '⚠️ NOT Renounced'}\n\n"
+            f"{security_report}\n\n"
             f"┌─────────────────────┐\n"
             f"│  💰 *YOUR BALANCES*  │\n"
             f"└─────────────────────┘\n\n"
