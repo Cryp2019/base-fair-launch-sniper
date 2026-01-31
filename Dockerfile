@@ -12,6 +12,7 @@ COPY database.py .
 COPY trading.py .
 COPY security_scanner.py .
 COPY admin.py .
+COPY payment_monitor.py .
 
 # Create directory for database
 RUN mkdir -p /app/data

@@ -17,6 +17,7 @@ from database import UserDatabase
 from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
+from payment_monitor import PaymentMonitor
 
 # Load environment variables
 if os.path.exists('.env'):
@@ -1858,6 +1859,14 @@ async def main():
 
     logger.info(f"✅ Bot username: @{BOT_USERNAME}")
     logger.info("✅ Database initialized")
+
+    # Check payment wallet configuration
+    payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS')
+    if payment_wallet:
+        logger.info(f"💰 Payment wallet: {payment_wallet}")
+    else:
+        logger.warning("⚠️ PAYMENT_WALLET_ADDRESS not set - premium payments disabled")
+
     logger.info("")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("🔍 Starting real-time scanning...")
@@ -1872,12 +1881,24 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    # Start payment monitor if wallet is configured
+    payment_monitor_task = None
+    if payment_wallet:
+        try:
+            payment_monitor = PaymentMonitor(w3, db, payment_wallet, app)
+            payment_monitor_task = asyncio.create_task(payment_monitor.start_monitoring())
+            logger.info("💰 Payment monitor started - auto-upgrades enabled!")
+        except Exception as e:
+            logger.error(f"Failed to start payment monitor: {e}")
+
     # Start scanning loop
     try:
         await scan_loop(app)
     except KeyboardInterrupt:
         logger.info("\n👋 Shutting down gracefully...")
     finally:
+        if payment_monitor_task:
+            payment_monitor_task.cancel()
         await app.stop()
 
 if __name__ == '__main__':

@@ -277,6 +277,23 @@ class UserDatabase:
 
         return result[0] if result else None
 
+    def get_user_by_wallet(self, wallet_address: str) -> Optional[int]:
+        """Find user ID by wallet address"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT user_id
+            FROM wallets
+            WHERE wallet_address = ? AND is_active = 1
+            LIMIT 1
+        ''', (wallet_address,))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        return result[0] if result else None
+
     def delete_wallet(self, user_id: int, wallet_address: str) -> bool:
         """Soft delete a wallet"""
         conn = sqlite3.connect(self.db_path)
