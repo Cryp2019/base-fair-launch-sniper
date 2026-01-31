@@ -1,10 +1,15 @@
 services:
-  - type: web
-    name: base-fair-launch-sniper
-    runtime: python
+  - type: worker
+    name: base-sniper-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python simple_bot.py
+    startCommand: python sniper_bot.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALCHEMY_BASE_KEY
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: PAYMENT_WALLET_ADDRESS
+        sync: false
