@@ -55,7 +55,20 @@ class UserDatabase:
                 total_referrals INTEGER
             )
         ''')
-        
+
+        # Wallets table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                wallet_address TEXT UNIQUE,
+                private_key TEXT,
+                created_date TEXT,
+                is_active INTEGER DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
     
@@ -203,6 +216,100 @@ class UserDatabase:
         cursor.execute('UPDATE users SET tier = ? WHERE user_id = ?', (tier, user_id))
         conn.commit()
         conn.close()
+
+    def create_wallet(self, user_id: int, wallet_address: str, private_key: str) -> Dict:
+        """Create a new wallet for a user"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute('''
+                INSERT INTO wallets (user_id, wallet_address, private_key, created_date)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, wallet_address, private_key, datetime.utcnow().isoformat()))
+
+            conn.commit()
+            conn.close()
+            return {'success': True, 'wallet_address': wallet_address}
+        except sqlite3.IntegrityError:
+            conn.close()
+            return {'success': False, 'message': 'Wallet already exists'}
+        except Exception as e:
+            conn.close()
+            return {'success': False, 'message': str(e)}
+
+    def get_user_wallets(self, user_id: int) -> List[Dict]:
+        """Get all wallets for a user"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT wallet_address, created_date, is_active
+            FROM wallets
+            WHERE user_id = ? AND is_active = 1
+            ORDER BY created_date DESC
+        ''', (user_id,))
+
+        wallets = []
+        for row in cursor.fetchall():
+            wallets.append({
+                'wallet_address': row[0],
+                'created_date': row[1],
+                'is_active': row[2]
+            })
+
+        conn.close()
+        return wallets
+
+    def get_wallet_private_key(self, user_id: int, wallet_address: str) -> Optional[str]:
+        """Get private key for a specific wallet (use with caution!)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT private_key
+            FROM wallets
+            WHERE user_id = ? AND wallet_address = ? AND is_active = 1
+        ''', (user_id, wallet_address))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        return result[0] if result else None
+
+    def delete_wallet(self, user_id: int, wallet_address: str) -> bool:
+        """Soft delete a wallet"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE wallets
+            SET is_active = 0
+            WHERE user_id = ? AND wallet_address = ?
+        ''', (user_id, wallet_address))
+
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        return affected > 0
+
+    def check_and_upgrade_premium(self, user_id: int) -> bool:
+        """Check if user has 10+ referrals and auto-upgrade to premium for 1 month"""
+        user = self.get_user(user_id)
+        if not user:
+            return False
+
+        # If user already has premium, don't downgrade
+        if user['tier'] == 'premium':
+            return False
+
+        # Check if user has 10+ referrals
+        if user['total_referrals'] >= 10:
+            self.update_tier(user_id, 'premium')
+            return True
+
+        return False
     
     def toggle_alerts(self, user_id: int) -> bool:
         """Toggle alerts on/off for user"""
@@ -215,3 +322,20 @@ class UserDatabase:
         conn.commit()
         conn.close()
         return bool(new_state)
+
+    def get_users_with_alerts(self) -> List[Dict]:
+        """Get all users with alerts enabled"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, username, first_name FROM users WHERE alerts_enabled = 1')
+
+        users = []
+        for row in cursor.fetchall():
+            users.append({
+                'user_id': row[0],
+                'username': row[1],
+                'first_name': row[2]
+            })
+
+        conn.close()
+        return users
