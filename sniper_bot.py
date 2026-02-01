@@ -213,16 +213,25 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
 
 # ===== ENHANCED METRICS FUNCTIONS =====
 
-async def get_dexscreener_data(pair_address: str) -> dict:
+async def get_dexscreener_data(token_address: str) -> dict:
     """Fetch volume, price, and market cap data from DexScreener API"""
     try:
-        url = f"https://api.dexscreener.com/latest/dex/pairs/base/{pair_address}"
+        # Use the /tokens/ endpoint which accepts token contract addresses
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
         resp = requests.get(url, timeout=10)
         
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('pair'):
-                pair = data['pair']
+            # The /tokens/ endpoint returns an array of pairs
+            pairs = data.get('pairs', [])
+            
+            if pairs and len(pairs) > 0:
+                # Get the first pair (usually the most liquid one)
+                # Or find the pair with highest liquidity
+                pair = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0)) if p.get('liquidity') else 0)
+                
+                logger.info(f"DexScreener found pair: {pair.get('pairAddress', 'unknown')} with ${float(pair.get('liquidity', {}).get('usd', 0)):,.2f} liquidity")
+                
                 return {
                     'price_usd': float(pair.get('priceUsd', 0)),
                     'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
@@ -231,6 +240,8 @@ async def get_dexscreener_data(pair_address: str) -> dict:
                     'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
                     'ath': float(pair.get('ath', 0)) if pair.get('ath') else None
                 }
+            else:
+                logger.warning(f"DexScreener: No pairs found for token {token_address}")
     except Exception as e:
         logger.warning(f"DexScreener API failed: {e}")
     
