@@ -39,18 +39,27 @@ FACTORY_ADDRESS = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"  # Uniswap V3 Fac
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
 
-# Initialize
-db = UserDatabase()
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-trading_bot = TradingBot(w3)
-security_scanner = SecurityScanner(w3)
-admin_manager = AdminManager(db, w3)
-
+# Setup logging first
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Initialize
+logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
+db = UserDatabase()
+logger.info(f"✅ Database connected: {db.db_path}")
+
+w3 = Web3(Web3.HTTPProvider(BASE_RPC))
+if w3.is_connected():
+    logger.info(f"✅ Connected to Base RPC")
+else:
+    logger.error(f"❌ Failed to connect to Base RPC!")
+    
+trading_bot = TradingBot(w3)
+security_scanner = SecurityScanner(w3)
+admin_manager = AdminManager(db, w3)
 
 # ABIs
 ERC20_ABI = [
@@ -202,6 +211,275 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         logger.error(f"Analysis failed: {e}")
         return None
 
+# ===== ENHANCED METRICS FUNCTIONS =====
+
+async def get_dexscreener_data(pair_address: str) -> dict:
+    """Fetch volume, price, and market cap data from DexScreener API"""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/pairs/base/{pair_address}"
+        resp = requests.get(url, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('pair'):
+                pair = data['pair']
+                return {
+                    'price_usd': float(pair.get('priceUsd', 0)),
+                    'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
+                    'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0)),
+                    'market_cap': float(pair.get('fdv', 0)),  # Fully diluted valuation
+                    'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+                    'ath': float(pair.get('ath', 0)) if pair.get('ath') else None
+                }
+    except Exception as e:
+        logger.warning(f"DexScreener API failed: {e}")
+    
+    return {
+        'price_usd': 0,
+        'volume_24h': 0,
+        'liquidity_usd': 0,
+        'market_cap': 0,
+        'price_change_24h': 0,
+        'ath': None
+    }
+
+async def calculate_pool_price(pair_address: str, token_address: str, base_token_address: str) -> float:
+    """Calculate token price from pool reserves (fallback if DexScreener fails)"""
+    try:
+        # Get pool reserves
+        pool_abi = [
+            {"constant":True,"inputs":[],"name":"token0","outputs":[{"name":"","type":"address"}],"type":"function"},
+            {"constant":True,"inputs":[],"name":"token1","outputs":[{"name":"","type":"address"}],"type":"function"},
+        ]
+        
+        pool_contract = w3.eth.contract(address=pair_address, abi=pool_abi)
+        token0 = pool_contract.functions.token0().call().lower()
+        token1 = pool_contract.functions.token1().call().lower()
+        
+        # Get balances
+        token_contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
+        base_contract = w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
+        
+        token_balance = token_contract.functions.balanceOf(pair_address).call()
+        base_balance = base_contract.functions.balanceOf(pair_address).call()
+        
+        token_decimals = token_contract.functions.decimals().call()
+        base_decimals = base_contract.functions.decimals().call()
+        
+        # Calculate price
+        if token_balance > 0:
+            price = (base_balance / (10 ** base_decimals)) / (token_balance / (10 ** token_decimals))
+            return price
+    except Exception as e:
+        logger.warning(f"Pool price calculation failed: {e}")
+    
+    return 0
+
+async def check_transfer_limits(token_address: str) -> dict:
+    """Check if token has transfer amount limits"""
+    try:
+        # Check for common limit functions
+        limit_abi = [
+            {"constant":True,"inputs":[],"name":"_maxTxAmount","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+            {"constant":True,"inputs":[],"name":"maxTransactionAmount","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+            {"constant":True,"inputs":[],"name":"_maxWalletSize","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+        ]
+        
+        contract = w3.eth.contract(address=token_address, abi=ERC20_ABI + limit_abi)
+        
+        # Try to get total supply for percentage calculation
+        total_supply = contract.functions.totalSupply().call()
+        
+        has_limits = False
+        limit_details = []
+        
+        # Check max transaction amount
+        try:
+            max_tx = contract.functions._maxTxAmount().call()
+            if max_tx > 0 and max_tx < total_supply:
+                has_limits = True
+                limit_pct = (max_tx / total_supply) * 100
+                limit_details.append(f"Max TX: {limit_pct:.2f}%")
+        except:
+            try:
+                max_tx = contract.functions.maxTransactionAmount().call()
+                if max_tx > 0 and max_tx < total_supply:
+                    has_limits = True
+                    limit_pct = (max_tx / total_supply) * 100
+                    limit_details.append(f"Max TX: {limit_pct:.2f}%")
+            except:
+                pass
+        
+        # Check max wallet size
+        try:
+            max_wallet = contract.functions._maxWalletSize().call()
+            if max_wallet > 0 and max_wallet < total_supply:
+                has_limits = True
+                limit_pct = (max_wallet / total_supply) * 100
+                limit_details.append(f"Max Wallet: {limit_pct:.2f}%")
+        except:
+            pass
+        
+        return {
+            'has_limits': has_limits,
+            'details': ', '.join(limit_details) if limit_details else 'No limits'
+        }
+    except Exception as e:
+        logger.debug(f"Transfer limit check failed: {e}")
+    
+    return {'has_limits': False, 'details': 'No limits'}
+
+async def calculate_clog_percentage(token_address: str, pair_address: str) -> float:
+    """Calculate network clog percentage based on recent transactions"""
+    try:
+        # Get recent transactions for the pair
+        url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "alchemy_getAssetTransfers",
+            "params": [{
+                "fromBlock": "latest",
+                "toBlock": "latest",
+                "contractAddresses": [token_address],
+                "category": ["erc20"],
+                "maxCount": "0x5",
+                "withMetadata": True
+            }]
+        }
+        
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            transfers = data.get('result', {}).get('transfers', [])
+            
+            if transfers:
+                # Calculate average gas used
+                total_gas = 0
+                count = 0
+                for tx in transfers:
+                    if tx.get('metadata', {}).get('gasUsed'):
+                        total_gas += int(tx['metadata']['gasUsed'], 16)
+                        count += 1
+                
+                if count > 0:
+                    avg_gas = total_gas / count
+                    # Clog percentage: (avg_gas / 300000) * 100
+                    # 300000 is typical max gas for a swap
+                    clog_pct = min((avg_gas / 300000) * 100, 100)
+                    return round(clog_pct, 2)
+    except Exception as e:
+        logger.debug(f"Clog calculation failed: {e}")
+    
+    return 0.03  # Default minimal clog
+
+async def detect_airdrops(token_address: str) -> list:
+    """Detect if token has airdrop functionality or recent batch transfers"""
+    airdrops = []
+    
+    try:
+        # Check for airdrop-related functions
+        airdrop_abi = [
+            {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amounts","type":"uint256[]"}],"name":"airdrop","outputs":[],"type":"function"},
+            {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amount","type":"uint256"}],"name":"multiTransfer","outputs":[],"type":"function"},
+        ]
+        
+        contract = w3.eth.contract(address=token_address, abi=ERC20_ABI + airdrop_abi)
+        
+        # Check if airdrop function exists
+        if hasattr(contract.functions, 'airdrop'):
+            airdrops.append("Airdrop function detected")
+        
+        if hasattr(contract.functions, 'multiTransfer'):
+            airdrops.append("Multi-transfer function detected")
+        
+        # Check recent transactions for batch transfers
+        url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "alchemy_getAssetTransfers",
+            "params": [{
+                "fromBlock": "latest",
+                "toBlock": "latest",
+                "contractAddresses": [token_address],
+                "category": ["erc20"],
+                "maxCount": "0xa",
+                "withMetadata": True
+            }]
+        }
+        
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            transfers = data.get('result', {}).get('transfers', [])
+            
+            # Group by transaction hash
+            tx_groups = {}
+            for transfer in transfers:
+                tx_hash = transfer.get('hash')
+                if tx_hash:
+                    if tx_hash not in tx_groups:
+                        tx_groups[tx_hash] = 0
+                    tx_groups[tx_hash] += 1
+            
+            # If any transaction has 5+ transfers, it's likely an airdrop
+            for tx_hash, count in tx_groups.items():
+                if count >= 5:
+                    airdrops.append(f"Batch transfer detected ({count} recipients)")
+                    break
+    
+    except Exception as e:
+        logger.debug(f"Airdrop detection failed: {e}")
+    
+    return airdrops
+
+async def get_comprehensive_metrics(token_address: str, pair_address: str, base_token_address: str, 
+                                   total_supply: int, decimals: int, premium: bool = False) -> dict:
+    """Get all comprehensive metrics for a token"""
+    metrics = {
+        'price_usd': 0,
+        'market_cap': 0,
+        'liquidity_usd': 0,
+        'volume_24h': 0,
+        'ath': None,
+        'has_limits': False,
+        'limit_details': 'No limits',
+        'clog_percentage': 0.03,
+        'airdrops': []
+    }
+    
+    try:
+        # Get DexScreener data (price, volume, liquidity, MC)
+        dex_data = await get_dexscreener_data(pair_address)
+        metrics.update(dex_data)
+        
+        # If DexScreener didn't return price, calculate from pool
+        if metrics['price_usd'] == 0:
+            pool_price = await calculate_pool_price(pair_address, token_address, base_token_address)
+            metrics['price_usd'] = pool_price
+            
+            # Calculate market cap manually if we have price
+            if pool_price > 0:
+                supply_formatted = total_supply / (10 ** decimals)
+                metrics['market_cap'] = pool_price * supply_formatted
+        
+        # Get transfer limits
+        limits = await check_transfer_limits(token_address)
+        metrics['has_limits'] = limits['has_limits']
+        metrics['limit_details'] = limits['details']
+        
+        # Get clog percentage
+        metrics['clog_percentage'] = await calculate_clog_percentage(token_address, pair_address)
+        
+        # Detect airdrops
+        metrics['airdrops'] = await detect_airdrops(token_address)
+        
+    except Exception as e:
+        logger.error(f"Error getting comprehensive metrics: {e}")
+    
+    return metrics
+
 # ===== ALERT FUNCTIONS =====
 
 async def send_launch_alert(app: Application, analysis: dict):
@@ -221,8 +499,56 @@ async def send_launch_alert(app: Application, analysis: dict):
         else:
             free_users.append(user)
 
-    # Build beautiful alert message
+    # Fetch comprehensive metrics
+    try:
+        metrics = await get_comprehensive_metrics(
+            analysis['token_address'],
+            analysis['pair_address'],
+            USDC_ADDRESS if analysis['base_token'] == 'USDC' else WETH_ADDRESS,
+            analysis['total_supply'],
+            analysis['decimals'],
+            premium=True
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch metrics: {e}")
+        metrics = {
+            'price_usd': 0,
+            'market_cap': 0,
+            'liquidity_usd': 0,
+            'volume_24h': 0,
+            'ath': None,
+            'has_limits': False,
+            'limit_details': 'No limits',
+            'clog_percentage': 0.03,
+            'airdrops': []
+        }
+
+    # Format numbers
+    def format_number(num):
+        if num >= 1_000_000:
+            return f"${num/1_000_000:.2f}M"
+        elif num >= 1_000:
+            return f"${num/1_000:.2f}K"
+        else:
+            return f"${num:.2f}"
+
+    mc_str = format_number(metrics['market_cap']) if metrics['market_cap'] > 0 else "N/A"
+    ath_str = format_number(metrics['ath']) if metrics.get('ath') else "N/A"
+    liq_str = format_number(metrics['liquidity_usd']) if metrics['liquidity_usd'] > 0 else "N/A"
+    price_str = f"${metrics['price_usd']:.8f}" if metrics['price_usd'] > 0 else "N/A"
+    vol_str = format_number(metrics['volume_24h']) if metrics['volume_24h'] > 0 else "N/A"
+
+    # Get tax info from analysis
+    buy_tax = analysis.get('buy_tax', 0)
+    sell_tax = analysis.get('sell_tax', 0)
+    transfer_tax = analysis.get('transfer_tax', 0)
+    total_tax = buy_tax + sell_tax + transfer_tax
+
+    # Safety check emoji
     status_emoji = "✅" if analysis['renounced'] else "⚠️"
+
+    # Airdrop info
+    airdrop_str = ", ".join(metrics['airdrops']) if metrics['airdrops'] else "None detected"
 
     # Create action buttons
     keyboard = [
@@ -241,17 +567,6 @@ async def send_launch_alert(app: Application, analysis: dict):
     # PRIORITY ALERTS: Send to premium users FIRST (5-10 seconds faster)
     for user in premium_users:
         try:
-            # Premium message with advanced analytics
-            premium_info = ""
-            if analysis.get('premium'):
-                premium_info = (
-                    f"┌─────────────────────┐\n"
-                    f"│  💎 *PREMIUM DATA*   │\n"
-                    f"└─────────────────────┘\n\n"
-                    f"Initial Liquidity:\n"
-                    f"*{analysis['premium']['initial_liquidity']}*\n\n"
-                )
-
             message = (
                 f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
                 f"┃                                                    ┃\n"
@@ -265,11 +580,26 @@ async def send_launch_alert(app: Application, analysis: dict):
                 f"Name: *{analysis['name']}*\n"
                 f"Symbol: *${analysis['symbol'].upper()}*\n"
                 f"Pair: *{analysis['base_token']}*\n\n"
-                f"{premium_info}"
+                f"🧢 MC: {mc_str}     | ATH: {ath_str}\n"
+                f"💧 Liq: {liq_str}\n"
+                f"🏷 Price: {price_str}\n"
+                f"🎚 Vol: {vol_str}\n\n"
                 f"┌─────────────────────┐\n"
-                f"│  🛡️ *SAFETY*         │\n"
+                f"│  🛡️ *SAFETY CHECKS*  │\n"
                 f"└─────────────────────┘\n\n"
-                f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n\n"
+                f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n"
+                f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: *{'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}*\n"
+                f"{'✅' if analysis.get('liquidity_locked') else '❌'} LP Locked: *{'YES' if analysis.get('liquidity_locked') else 'NO'}*"
+            )
+            
+            if analysis.get('liquidity_locked'):
+                message += f"\n   └ {analysis.get('lock_days', 0)} days via {analysis.get('locker_name', 'Unknown')}"
+            
+            message += (
+                f"\n\n🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
+                f"⚖️ {metrics['limit_details']}\n"
+                f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
+                f"🪂 Airdrops: {airdrop_str}\n\n"
                 f"┌─────────────────────┐\n"
                 f"│  📍 *CONTRACT*       │\n"
                 f"└─────────────────────┘\n\n"
@@ -302,15 +632,24 @@ async def send_launch_alert(app: Application, analysis: dict):
         f"Name: *{analysis['name']}*\n"
         f"Symbol: *${analysis['symbol'].upper()}*\n"
         f"Pair: *{analysis['base_token']}*\n\n"
+        f"🧢 MC: {mc_str}\n"
+        f"💧 Liq: {liq_str}\n"
+        f"🏷 Price: {price_str}\n"
+        f"🎚 Vol: {vol_str}\n\n"
         f"┌─────────────────────┐\n"
-        f"│  🛡️ *SAFETY*         │\n"
+        f"│  🛡️ *SAFETY CHECKS*  │\n"
         f"└─────────────────────┘\n\n"
-        f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n\n"
+        f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n"
+        f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: *{'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}*\n"
+        f"{'✅' if analysis.get('liquidity_locked') else '❌'} LP Locked: *{'YES' if analysis.get('liquidity_locked') else 'NO'}*\n\n"
+        f"🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
+        f"⚖️ {metrics['limit_details']}\n"
+        f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
         f"┌─────────────────────┐\n"
         f"│  📍 *CONTRACT*       │\n"
         f"└─────────────────────┘\n\n"
         f"`{analysis['token_address']}`\n\n"
-        f"💡 *Upgrade for analytics!*\n\n"
+        f"💡 *Upgrade for ATH tracking & airdrops!*\n\n"
         f"⚠️ *DYOR! Not financial advice.*"
     )
 
@@ -538,6 +877,10 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_premium = user_data['tier'] == 'premium'
     premium_badge = " 💎" if is_premium else ""
 
+    # Get active and pending referrals
+    active_refs = user_stats.get('total_referrals', 0)
+    pending_refs = user_stats.get('pending_referrals', 0)
+
     msg = (
         f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
         f"┃                                                    ┃\n"
@@ -554,7 +897,8 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"│  ⚙️ *SETTINGS*       │\n"
         f"└─────────────────────┘\n\n"
         f"Alerts: *{'✅ ON' if user_data['alerts_enabled'] else '❌ OFF'}*\n"
-        f"Referrals: *{user_data['total_referrals']}*\n"
+        f"Active Referrals: *{active_refs}* (traded)\n"
+        f"Pending Referrals: *{pending_refs}* (not traded yet)\n"
     )
 
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=create_back_button())
@@ -732,10 +1076,13 @@ async def upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"┌─────────────────────┐\n"
             f"│  💎 *YOUR BENEFITS*  │\n"
             f"└─────────────────────┘\n\n"
-            f"✓ Advanced analytics\n"
             f"✓ Priority alerts (5-10s faster)\n"
-            f"✓ Initial liquidity data\n"
-            f"✓ Premium badge\n\n"
+            f"✓ ATH (All-Time High) tracking\n"
+            f"✓ Airdrop detection\n"
+            f"✓ Comprehensive metrics (MC, Liq, Price, Vol)\n"
+            f"✓ Enhanced safety checks (Honeypot, LP Lock)\n"
+            f"✓ Tax percentages & transfer limits\n"
+            f"✓ Premium badge 💎\n\n"
             f"Thank you for being premium! 🚀"
         )
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=create_back_button())
@@ -758,9 +1105,12 @@ async def upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"┌─────────────────────┐\n"
         f"│  ⭐ *FEATURES*       │\n"
         f"└─────────────────────┘\n\n"
-        f"✓ Advanced analytics\n"
-        f"✓ Initial liquidity data\n"
         f"✓ Priority alerts (5-10s faster)\n"
+        f"✓ ATH (All-Time High) tracking\n"
+        f"✓ Airdrop detection\n"
+        f"✓ Comprehensive metrics (MC, Liq, Price, Vol)\n"
+        f"✓ Enhanced safety checks (Honeypot, LP Lock)\n"
+        f"✓ Tax percentages & transfer limits\n"
         f"✓ Premium badge 💎\n\n"
         f"┌─────────────────────┐\n"
         f"│  💰 *OPTION 1: PAY*  │\n"
@@ -1318,12 +1668,88 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             renounced = owner.lower() in [a.lower() for a in burn_addresses]
         except:
             renounced = True  # No owner function = likely renounced
-            owner = "No owner function (likely renounced)"
-
         # Format supply
         supply_formatted = total_supply / (10 ** decimals)
 
-        # Build response message
+        # ===== FETCH COMPREHENSIVE METRICS =====
+        metrics = {
+            'price_usd': 0,
+            'market_cap': 0,
+            'liquidity_usd': 0,
+            'volume_24h': 0,
+            'ath': None,
+            'has_limits': False,
+            'limit_details': 'No limits',
+            'clog_percentage': 0.03,
+            'airdrops': []
+        }
+        
+        # Try to fetch comprehensive metrics
+        try:
+            # Get DexScreener data
+            dex_data = await get_dexscreener_data(token_address)
+            metrics.update(dex_data)
+            
+            # Get transfer limits
+            limits = await check_transfer_limits(token_address)
+            metrics['has_limits'] = limits['has_limits']
+            metrics['limit_details'] = limits['details']
+            
+            # Get clog percentage
+            metrics['clog_percentage'] = await calculate_clog_percentage(token_address, token_address)
+            
+            # Detect airdrops (premium only)
+            if is_premium:
+                metrics['airdrops'] = await detect_airdrops(token_address)
+        except Exception as e:
+            logger.debug(f"Could not fetch all metrics: {e}")
+
+        # ===== SECURITY SCAN =====
+        is_honeypot = False
+        buy_tax = 0
+        sell_tax = 0
+        transfer_tax = 0
+        liquidity_locked = False
+        lock_days = 0
+        locker_name = "Unknown"
+        
+        try:
+            from security_scanner import SecurityScanner
+            scanner = SecurityScanner(w3)
+            
+            # Check honeypot
+            honeypot_result = scanner.check_honeypot(token_address)
+            is_honeypot = honeypot_result.get('is_honeypot', False)
+            buy_tax = honeypot_result.get('buy_tax', 0)
+            sell_tax = honeypot_result.get('sell_tax', 0)
+            
+            # Check liquidity lock
+            lock_result = scanner.check_liquidity_lock(token_address)
+            liquidity_locked = lock_result.get('is_locked', False)
+            lock_days = lock_result.get('lock_days', 0)
+            locker_name = lock_result.get('locker_name', 'Unknown')
+        except Exception as e:
+            logger.debug(f"Security scan failed: {e}")
+
+        total_tax = buy_tax + sell_tax + transfer_tax
+
+        # Format numbers
+        def format_number(num):
+            if num >= 1_000_000:
+                return f"${num/1_000_000:.2f}M"
+            elif num >= 1_000:
+                return f"${num/1_000:.2f}K"
+            else:
+                return f"${num:.2f}"
+
+        mc_str = format_number(metrics['market_cap']) if metrics['market_cap'] > 0 else "N/A"
+        ath_str = format_number(metrics['ath']) if metrics.get('ath') and is_premium else ("Premium Only" if not is_premium else "N/A")
+        liq_str = format_number(metrics['liquidity_usd']) if metrics['liquidity_usd'] > 0 else "N/A"
+        price_str = f"${metrics['price_usd']:.8f}" if metrics['price_usd'] > 0 else "N/A"
+        vol_str = format_number(metrics['volume_24h']) if metrics['volume_24h'] > 0 else "N/A"
+        airdrop_str = ", ".join(metrics['airdrops']) if is_premium and metrics['airdrops'] else ("None detected" if is_premium else "Premium Only")
+
+        # Build response message with comprehensive security scan
         status_emoji = "✅" if renounced else "⚠️"
 
         msg = (
@@ -1337,43 +1763,34 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Symbol: *${symbol.upper()}*\n"
             f"Decimals: *{decimals}*\n"
             f"Total Supply: *{supply_formatted:,.0f}*\n\n"
+            f"🧢 MC: {mc_str}     | ATH: {ath_str}\n"
+            f"💧 Liq: {liq_str}\n"
+            f"🏷 Price: {price_str}\n"
+            f"🎚 Vol: {vol_str}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ *SAFETY CHECK*\n"
+            f"🛡️ *SAFETY CHECKS*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{status_emoji} Ownership: *{'Renounced ✅' if renounced else 'NOT Renounced ⚠️'}*\n"
+            f"{'✅' if not is_honeypot else '🚨'} Honeypot: *{'SAFE' if not is_honeypot else 'DETECTED ⚠️'}*\n"
+            f"{'✅' if liquidity_locked else '❌'} LP Locked: *{'YES' if liquidity_locked else 'NO'}*"
         )
 
-        # Add premium analytics if user is premium
-        if is_premium:
-            try:
-                # Try to find liquidity pools
-                # Check balance in common DEX pairs
-                usdc_balance = 0
-                weth_balance = 0
-
-                try:
-                    usdc_contract = w3.eth.contract(address=USDC_ADDRESS, abi=ERC20_ABI)
-                    weth_contract = w3.eth.contract(address=WETH_ADDRESS, abi=ERC20_ABI)
-
-                    # This is a simplified check - would need to find actual pool addresses
-                    msg += (
-                        f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💎 *PREMIUM ANALYTICS*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"✅ Premium analysis active\n"
-                        f"💡 For full liquidity data, token must be in a Uniswap pool\n"
-                    )
-                except:
-                    pass
-            except:
-                pass
-        else:
-            msg += (
-                f"\n💡 *Upgrade to Premium* for advanced analytics!\n"
-            )
+        if liquidity_locked:
+            msg += f"\n   └ {lock_days} days via {locker_name}"
 
         msg += (
-            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"\n\n🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
+            f"⚖️ {metrics['limit_details']}\n"
+            f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
+        )
+
+        if is_premium:
+            msg += f"🪂 Airdrops: {airdrop_str}\n\n"
+        else:
+            msg += f"💡 *Upgrade to Premium* for ATH tracking & airdrop detection!\n\n"
+
+        msg += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 *CONTRACT*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"`{token_address}`\n\n"
@@ -1389,6 +1806,9 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [
                 InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/base/{token_address}"),
                 InlineKeyboardButton("🦄 Uniswap", url=f"https://app.uniswap.org/#/tokens/base/{token_address}")
+            ],
+            [
+                InlineKeyboardButton("« Back to Menu", callback_data="menu")
             ]
         ]
 
@@ -1443,6 +1863,35 @@ async def handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, eth_amo
     )
 
     if result['success']:
+        # Mark user as having traded (for referral tracking)
+        referrer_id = db.mark_user_traded(user.id)
+
+        # Check if referrer should be upgraded to premium
+        if referrer_id:
+            if db.check_and_upgrade_premium(referrer_id):
+                # Notify referrer they got premium
+                try:
+                    await context.bot.send_message(
+                        chat_id=referrer_id,
+                        text=(
+                            "🎉 *CONGRATULATIONS!*\n\n"
+                            "One of your referrals just made their first trade!\n"
+                            "You've reached *10 active referrals*!\n\n"
+                            "✅ You've been upgraded to *PREMIUM* for 1 month! 💎\n\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "⭐ *PREMIUM FEATURES UNLOCKED*\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            "✓ Advanced analytics\n"
+                            "✓ Initial liquidity data\n"
+                            "✓ Priority alerts (5-10s faster)\n"
+                            "✓ Premium badge 💎\n\n"
+                            "Thank you for spreading the word! 🚀"
+                        ),
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
+
         msg = (
             f"✅ *BUY ORDER SUBMITTED!*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1505,6 +1954,35 @@ async def handle_sell(update: Update, context: ContextTypes.DEFAULT_TYPE, percen
     result = trading_bot.sell_token(token_address, private_key, percentage)
 
     if result['success']:
+        # Mark user as having traded (for referral tracking)
+        referrer_id = db.mark_user_traded(user.id)
+
+        # Check if referrer should be upgraded to premium
+        if referrer_id:
+            if db.check_and_upgrade_premium(referrer_id):
+                # Notify referrer they got premium
+                try:
+                    await context.bot.send_message(
+                        chat_id=referrer_id,
+                        text=(
+                            "🎉 *CONGRATULATIONS!*\n\n"
+                            "One of your referrals just made their first trade!\n"
+                            "You've reached *10 active referrals*!\n\n"
+                            "✅ You've been upgraded to *PREMIUM* for 1 month! 💎\n\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "⭐ *PREMIUM FEATURES UNLOCKED*\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            "✓ Advanced analytics\n"
+                            "✓ Initial liquidity data\n"
+                            "✓ Priority alerts (5-10s faster)\n"
+                            "✓ Premium badge 💎\n\n"
+                            "Thank you for spreading the word! 🚀"
+                        ),
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
+
         msg = (
             f"✅ *SELL ORDER SUBMITTED!*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"

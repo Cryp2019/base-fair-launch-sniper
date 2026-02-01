@@ -4,73 +4,100 @@ Tracks users, referrals, and tier status
 """
 import sqlite3
 import os
+import logging
 from datetime import datetime
 from typing import Optional, Dict, List
 
+logger = logging.getLogger(__name__)
+
 class UserDatabase:
     def __init__(self, db_path='users.db'):
-        self.db_path = db_path
+        # Use absolute path to ensure database is always found
+        if not os.path.isabs(db_path):
+            # Get the directory where this script is located
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.db_path = os.path.join(script_dir, db_path)
+        else:
+            self.db_path = db_path
+        
+        logger.info(f"📁 Database path: {self.db_path}")
         self.init_database()
     
     def init_database(self):
         """Initialize database tables"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
         
-        # Users table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                joined_date TEXT,
-                referrer_id INTEGER,
-                referral_code TEXT UNIQUE,
-                tier TEXT DEFAULT 'free',
-                alerts_enabled INTEGER DEFAULT 1,
-                total_referrals INTEGER DEFAULT 0,
-                FOREIGN KEY (referrer_id) REFERENCES users(user_id)
-            )
-        ''')
-        
-        # Referrals table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER,
-                referred_id INTEGER,
-                referral_date TEXT,
-                FOREIGN KEY (referrer_id) REFERENCES users(user_id),
-                FOREIGN KEY (referred_id) REFERENCES users(user_id)
-            )
-        ''')
-        
-        # Stats table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,
-                total_users INTEGER,
-                new_users INTEGER,
-                total_referrals INTEGER
-            )
-        ''')
+            # Users table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    joined_date TEXT,
+                    referrer_id INTEGER,
+                    referral_code TEXT UNIQUE,
+                    tier TEXT DEFAULT 'free',
+                    alerts_enabled INTEGER DEFAULT 1,
+                    total_referrals INTEGER DEFAULT 0,
+                    FOREIGN KEY (referrer_id) REFERENCES users(user_id)
+                )
+            ''')
+            
+            # Referrals table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_id INTEGER,
+                    referred_id INTEGER,
+                    referral_date TEXT,
+                    has_traded INTEGER DEFAULT 0,
+                    first_trade_date TEXT,
+                    FOREIGN KEY (referrer_id) REFERENCES users(user_id),
+                    FOREIGN KEY (referred_id) REFERENCES users(user_id)
+                )
+            ''')
+            
+            # Stats table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT,
+                    total_users INTEGER,
+                    new_users INTEGER,
+                    total_referrals INTEGER
+                )
+            ''')
 
-        # Wallets table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                wallet_address TEXT UNIQUE,
-                private_key TEXT,
-                created_date TEXT,
-                is_active INTEGER DEFAULT 1,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        ''')
+            # Wallets table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS wallets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    wallet_address TEXT UNIQUE,
+                    private_key TEXT,
+                    created_date TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"✅ Database initialized successfully")
+            
+            # Verify database is accessible
+            if os.path.exists(self.db_path):
+                size = os.path.getsize(self.db_path)
+                logger.info(f"📊 Database size: {size} bytes")
+            else:
+                logger.error(f"❌ Database file not found after initialization!")
+                
+        except Exception as e:
+            logger.error(f"❌ Database initialization failed: {e}")
+            raise
     
     def add_user(self, user_id: int, username: str = None, first_name: str = None, 
                  referrer_code: str = None) -> Dict:
@@ -94,12 +121,9 @@ class UserDatabase:
             result = cursor.fetchone()
             if result:
                 referrer_id = result[0]
-                # Update referrer's total referrals
-                cursor.execute('UPDATE users SET total_referrals = total_referrals + 1 WHERE user_id = ?', 
-                             (referrer_id,))
-                # Add to referrals table
-                cursor.execute('INSERT INTO referrals (referrer_id, referred_id, referral_date) VALUES (?, ?, ?)',
-                             (referrer_id, user_id, datetime.utcnow().isoformat()))
+                # Add to referrals table (but don't count yet - only counts when they trade)
+                cursor.execute('INSERT INTO referrals (referrer_id, referred_id, referral_date, has_traded) VALUES (?, ?, ?, ?)',
+                             (referrer_id, user_id, datetime.utcnow().isoformat(), 0))
         
         # Insert new user
         cursor.execute('''
@@ -145,34 +169,42 @@ class UserDatabase:
         user = self.get_user(user_id)
         if not user:
             return None
-        
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        # Get referral details
+
+        # Get active referral details (users who have traded)
         cursor.execute('''
-            SELECT u.user_id, u.username, u.first_name, r.referral_date
+            SELECT u.user_id, u.username, u.first_name, r.referral_date, r.has_traded, r.first_trade_date
             FROM referrals r
             JOIN users u ON r.referred_id = u.user_id
             WHERE r.referrer_id = ?
             ORDER BY r.referral_date DESC
         ''', (user_id,))
-        
+
         referrals = []
+        active_referrals = []
         for row in cursor.fetchall():
-            referrals.append({
+            ref_data = {
                 'user_id': row[0],
                 'username': row[1],
                 'first_name': row[2],
-                'date': row[3]
-            })
-        
+                'date': row[3],
+                'has_traded': bool(row[4]),
+                'first_trade_date': row[5]
+            }
+            referrals.append(ref_data)
+            if row[4]:  # has_traded
+                active_referrals.append(ref_data)
+
         conn.close()
-        
+
         return {
             'user': user,
             'referrals': referrals,
-            'total_referrals': len(referrals)
+            'active_referrals': active_referrals,
+            'total_referrals': len(active_referrals),  # Only count active ones
+            'pending_referrals': len(referrals) - len(active_referrals)
         }
     
     def get_total_users(self) -> int:
@@ -185,10 +217,10 @@ class UserDatabase:
         return count
     
     def get_leaderboard(self, limit: int = 10) -> List[Dict]:
-        """Get top referrers"""
+        """Get top referrers (only counting active referrals who have traded)"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             SELECT user_id, username, first_name, total_referrals
             FROM users
@@ -196,16 +228,16 @@ class UserDatabase:
             ORDER BY total_referrals DESC
             LIMIT ?
         ''', (limit,))
-        
+
         leaderboard = []
         for row in cursor.fetchall():
             leaderboard.append({
                 'user_id': row[0],
                 'username': row[1],
                 'first_name': row[2],
-                'total_referrals': row[3]
+                'total_referrals': row[3]  # This now only counts active referrals
             })
-        
+
         conn.close()
         return leaderboard
     
@@ -311,8 +343,58 @@ class UserDatabase:
 
         return affected > 0
 
+    def mark_user_traded(self, user_id: int) -> Optional[int]:
+        """
+        Mark that a user has made their first trade.
+        If they were referred, increment referrer's count and check for premium upgrade.
+        Returns referrer_id if they should be upgraded to premium, None otherwise.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Check if this user was referred and hasn't traded yet
+        cursor.execute('''
+            SELECT referrer_id, has_traded
+            FROM referrals
+            WHERE referred_id = ?
+        ''', (user_id,))
+
+        result = cursor.fetchone()
+
+        if result and result[1] == 0:  # User was referred and hasn't traded yet
+            referrer_id = result[0]
+
+            # Mark as traded
+            cursor.execute('''
+                UPDATE referrals
+                SET has_traded = 1, first_trade_date = ?
+                WHERE referred_id = ?
+            ''', (datetime.utcnow().isoformat(), user_id))
+
+            # Increment referrer's total_referrals count
+            cursor.execute('''
+                UPDATE users
+                SET total_referrals = total_referrals + 1
+                WHERE user_id = ?
+            ''', (referrer_id,))
+
+            conn.commit()
+
+            # Check if referrer now has 10+ active referrals
+            cursor.execute('SELECT total_referrals FROM users WHERE user_id = ?', (referrer_id,))
+            total_refs = cursor.fetchone()[0]
+
+            conn.close()
+
+            # Return referrer_id if they hit 10 referrals
+            if total_refs >= 10:
+                return referrer_id
+
+        conn.close()
+        return None
+
     def check_and_upgrade_premium(self, user_id: int) -> bool:
-        """Check if user has 10+ referrals and auto-upgrade to premium for 1 month"""
+        """Check if user has 10+ active referrals (who have traded) and auto-upgrade to premium"""
         user = self.get_user(user_id)
         if not user:
             return False
@@ -321,7 +403,7 @@ class UserDatabase:
         if user['tier'] == 'premium':
             return False
 
-        # Check if user has 10+ referrals
+        # Check if user has 10+ active referrals (who have made trades)
         if user['total_referrals'] >= 10:
             self.update_tier(user_id, 'premium')
             return True
