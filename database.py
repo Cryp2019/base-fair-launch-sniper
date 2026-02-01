@@ -12,15 +12,35 @@ logger = logging.getLogger(__name__)
 
 class UserDatabase:
     def __init__(self, db_path='users.db'):
-        # Use absolute path to ensure database is always found
-        if not os.path.isabs(db_path):
-            # Get the directory where this script is located
+        # Determine database path based on environment
+        if os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_PROJECT_ID'):
+            # Running on Railway - use persistent volume path
+            # User needs to create a volume mounted at /data in Railway
+            self.db_path = '/data/users.db'
+            logger.info("🚂 Detected Railway environment - using persistent volume")
+        elif os.getenv('DATABASE_PATH'):
+            # Custom database path from environment variable
+            self.db_path = os.getenv('DATABASE_PATH')
+            logger.info(f"📌 Using custom DATABASE_PATH from environment")
+        elif not os.path.isabs(db_path):
+            # Local development - use script directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
             self.db_path = os.path.join(script_dir, db_path)
+            logger.info("💻 Local development mode")
         else:
             self.db_path = db_path
         
         logger.info(f"📁 Database path: {self.db_path}")
+        
+        # Ensure directory exists (for Railway volume)
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir and not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+                logger.info(f"📂 Created database directory: {db_dir}")
+            except Exception as e:
+                logger.warning(f"⚠️  Could not create directory {db_dir}: {e}")
+        
         self.init_database()
     
     def init_database(self):
