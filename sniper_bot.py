@@ -2359,15 +2359,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scan_loop(app: Application):
     """Continuous scanning for new launches"""
     logger.info("🔍 Starting scan loop...")
+    
+    # Check how many users have alerts enabled
+    users_with_alerts = db.get_users_with_alerts()
+    logger.info(f"📊 Users with alerts enabled: {len(users_with_alerts)}")
+    if len(users_with_alerts) == 0:
+        logger.warning("⚠️  No users have alerts enabled! Alerts will not be sent.")
+    else:
+        # Count premium vs free
+        premium_count = sum(1 for u in users_with_alerts if db.get_user(u['user_id'])['tier'] == 'premium')
+        free_count = len(users_with_alerts) - premium_count
+        logger.info(f"   👑 Premium users: {premium_count}")
+        logger.info(f"   🆓 Free users: {free_count}")
 
     # Start from current block
     last_block = w3.eth.block_number
     scanned_pairs = set()
+    scan_count = 0
 
     while True:
         try:
+            scan_count += 1
+            
             # Get new pairs (scans 10 blocks at a time due to Alchemy free tier limit)
             pairs = get_new_pairs(last_block)
+            
+            # Log scanning activity every 10 scans (~100 seconds)
+            if scan_count % 10 == 0:
+                current_block = w3.eth.block_number
+                logger.info(f"🔍 Scan #{scan_count}: Blocks {last_block:,} to {current_block:,} | Pairs found: {len(pairs)} | Total scanned: {len(scanned_pairs)}")
+
+            if len(pairs) > 0:
+                logger.info(f"✨ Found {len(pairs)} new pair(s) in this scan!")
 
             for pair in pairs:
                 pair_address = pair['address']
@@ -2391,10 +2414,12 @@ async def scan_loop(app: Application):
                 )
 
                 if analysis:
-                    logger.info(f"🚀 New launch detected: ${analysis['symbol']} ({analysis['name']})")
+                    logger.info(f"🚀 New launch detected: ${analysis['symbol']} ({analysis['name']}) on {analysis.get('dex_name', 'Unknown')}")
 
                     # Send alert to all users (premium users get priority + extra data)
                     await send_launch_alert(app, analysis)
+                else:
+                    logger.warning(f"⚠️  Failed to analyze pair {pair_address}")
 
                 # Small delay between analyses
                 await asyncio.sleep(1)
@@ -2411,6 +2436,8 @@ async def scan_loop(app: Application):
 
         except Exception as e:
             logger.error(f"Error in scan loop: {e}")
+            import traceback
+            traceback.print_exc()
             await asyncio.sleep(60)  # Wait longer on error
 
 # ===== MAIN =====
