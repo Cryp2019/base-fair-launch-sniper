@@ -556,7 +556,8 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
     
     try:
         # Get DexScreener data (price, volume, liquidity, MC)
-        dex_data = await get_dexscreener_data(pair_address)
+        # IMPORTANT: DexScreener API expects token address, not pair address
+        dex_data = await get_dexscreener_data(token_address)
         metrics.update(dex_data)
         
         # If DexScreener didn't return price, calculate from pool
