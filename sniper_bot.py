@@ -35,9 +35,63 @@ ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY')
 BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
 
 # Base chain addresses
-FACTORY_ADDRESS = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"  # Uniswap V3 Factory
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
+
+# Multi-DEX Factory Configuration
+FACTORIES = {
+    'uniswap_v3': {
+        'address': '0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
+        'type': 'v3',
+        'name': 'Uniswap V3',
+        'emoji': '🦄',
+        'event_topic': '0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118',  # PoolCreated
+        'enabled': True
+    },
+    'uniswap_v2': {
+        'address': '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6',
+        'type': 'v2',
+        'name': 'Uniswap V2',
+        'emoji': '🦄',
+        'event_topic': '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9',  # PairCreated
+        'enabled': True
+    },
+    'sushiswap': {
+        'address': '0x71524B4f93c58fcbF659783284E38825f0622859',
+        'type': 'v2',
+        'name': 'SushiSwap',
+        'emoji': '🍣',
+        'event_topic': '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9',  # PairCreated
+        'enabled': True
+    },
+    'aerodrome': {
+        'address': '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
+        'type': 'velodrome',
+        'name': 'Aerodrome',
+        'emoji': '✈️',
+        'event_topic': '0xc4805696c66d7cf352fc1d6bb633ad5ee82f6cb577c453024b6e0eb8306c6fc9',  # PairCreated
+        'enabled': True
+    },
+    'baseswap': {
+        'address': '0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB',
+        'type': 'v2',
+        'name': 'BaseSwap',
+        'emoji': '🔷',
+        'event_topic': '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9',  # PairCreated
+        'enabled': True
+    },
+    'swapbased': {
+        'address': '0x04C9f118d21e8B767D2e50C946f0cC9F6C367300',
+        'type': 'v2',
+        'name': 'SwapBased',
+        'emoji': '🔵',
+        'event_topic': '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9',  # PairCreated
+        'enabled': True
+    }
+}
+
+# Keep old FACTORY_ADDRESS for backward compatibility
+FACTORY_ADDRESS = FACTORIES['uniswap_v3']['address']
 
 # Setup logging first
 logging.basicConfig(
@@ -79,64 +133,101 @@ POOL_ABI = [
 # ===== SCANNING FUNCTIONS =====
 
 def get_new_pairs(last_block: int = None) -> list:
-    """Scan for new Uniswap V3 pairs on Base"""
+    """Scan for new pairs across multiple DEXs on Base"""
     if last_block is None:
         current_block = w3.eth.block_number
         last_block = current_block - 5  # Alchemy free tier: max 10 block range
 
-    pool_created_topic = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
+    all_pools = []
+    
+    # Alchemy free tier limits eth_getLogs to 10 block range
+    current_block = w3.eth.block_number
+    to_block = min(last_block + 10, current_block)
+    from_block_hex = hex(last_block)
+    to_block_hex = hex(to_block)
 
-    try:
-        # Alchemy free tier limits eth_getLogs to 10 block range
-        # So we scan from last_block to last_block + 10
-        current_block = w3.eth.block_number
-        to_block = min(last_block + 10, current_block)
+    # Scan each enabled DEX factory
+    for dex_id, config in FACTORIES.items():
+        if not config.get('enabled', True):
+            continue
+            
+        try:
+            logs = w3.eth.get_logs({
+                'fromBlock': from_block_hex,
+                'toBlock': to_block_hex,
+                'address': Web3.to_checksum_address(config['address']),
+                'topics': [config['event_topic']]
+            })
 
-        from_block_hex = hex(last_block)
-        to_block_hex = hex(to_block)
+            for log in logs:
+                try:
+                    pool_data = parse_pair_event(log, config['type'], dex_id, config)
+                    if pool_data:
+                        all_pools.append(pool_data)
+                        logger.info(f"{config['emoji']} Found new {config['name']} {pool_data['pair_type']} pair: {pool_data['address']}")
+                except Exception as e:
+                    logger.warning(f"Failed to decode {config['name']} log: {e}")
+                    continue
 
-        logs = w3.eth.get_logs({
-            'fromBlock': from_block_hex,
-            'toBlock': to_block_hex,
-            'address': Web3.to_checksum_address(FACTORY_ADDRESS),
-            'topics': [pool_created_topic]
-        })
+        except Exception as e:
+            logger.error(f"Failed to scan {config['name']}: {e}")
+            continue
 
-        pools = []
-        for log in logs:
-            try:
-                if len(log['topics']) >= 4:
-                    token0 = '0x' + log['topics'][1].hex()[-40:]
-                    token1 = '0x' + log['topics'][2].hex()[-40:]
-                    pool_address = '0x' + log['data'].hex()[-40:]
+    all_pools.sort(key=lambda x: x['block'], reverse=True)
+    return all_pools
 
-                    # Only track USDC or WETH pairs
-                    if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS or
-                        token0.lower() == WETH_ADDRESS or token1.lower() == WETH_ADDRESS):
 
-                        pair_type = "USDC" if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS) else "WETH"
+def parse_pair_event(log, dex_type: str, dex_id: str, config: dict) -> dict:
+    """Parse pair creation event based on DEX type"""
+    
+    if dex_type == 'v2':
+        # V2 DEXs (Uniswap V2, SushiSwap, BaseSwap, SwapBased)
+        # Event: PairCreated(address indexed token0, address indexed token1, address pair, uint)
+        if len(log['topics']) >= 3:
+            token0 = '0x' + log['topics'][1].hex()[-40:]
+            token1 = '0x' + log['topics'][2].hex()[-40:]
+            # Pair address is in the data field
+            pair_address = '0x' + log['data'].hex()[-40:]
+            
+    elif dex_type == 'v3':
+        # V3 DEXs (Uniswap V3)
+        # Event: PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)
+        if len(log['topics']) >= 4:
+            token0 = '0x' + log['topics'][1].hex()[-40:]
+            token1 = '0x' + log['topics'][2].hex()[-40:]
+            # Pool address is in the data field
+            pair_address = '0x' + log['data'].hex()[-40:]
+            
+    elif dex_type == 'velodrome':
+        # Velodrome-style DEXs (Aerodrome)
+        # Event: PairCreated(address indexed token0, address indexed token1, bool stable, address pair, uint)
+        if len(log['topics']) >= 3:
+            token0 = '0x' + log['topics'][1].hex()[-40:]
+            token1 = '0x' + log['topics'][2].hex()[-40:]
+            # Pair address is in the data field (after stable bool)
+            pair_address = '0x' + log['data'].hex()[-40:]
+    else:
+        return None
 
-                        pools.append({
-                            'address': pool_address,
-                            'token0': token0,
-                            'token1': token1,
-                            'block': log['blockNumber'],
-                            'pair_type': pair_type
-                        })
-                        logger.info(f"🔍 Found new {pair_type} pair: {pool_address}")
-            except Exception as e:
-                logger.warning(f"Failed to decode log: {e}")
-                continue
+    # Only track USDC or WETH pairs
+    if not (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS or
+            token0.lower() == WETH_ADDRESS or token1.lower() == WETH_ADDRESS):
+        return None
 
-        pools.sort(key=lambda x: x['block'], reverse=True)
-        return pools
+    pair_type = "USDC" if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS) else "WETH"
 
-    except Exception as e:
-        logger.error(f"Failed to fetch pairs: {e}")
-        logger.debug(f"Last block: {last_block}, Factory: {FACTORY_ADDRESS}")
-        return []
+    return {
+        'address': pair_address,
+        'token0': token0,
+        'token1': token1,
+        'block': log['blockNumber'],
+        'pair_type': pair_type,
+        'dex_id': dex_id,
+        'dex_name': config['name'],
+        'dex_emoji': config['emoji']
+    }
 
-def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics: bool = False) -> dict:
+def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics: bool = False, dex_name: str = "Unknown", dex_emoji: str = "🔷", dex_id: str = "unknown") -> dict:
     """Analyze a new token launch"""
     try:
         # Identify the new token (not USDC/WETH)
@@ -182,7 +273,10 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
             'base_token': base_token,
             'renounced': renounced,
             'owner': owner,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': datetime.utcnow().isoformat(),
+            'dex_name': dex_name,
+            'dex_emoji': dex_emoji,
+            'dex_id': dex_id
         }
 
         # PREMIUM ANALYTICS - Only for premium users
@@ -590,7 +684,8 @@ async def send_launch_alert(app: Application, analysis: dict):
                 f"└─────────────────────┘\n\n"
                 f"Name: *{analysis['name']}*\n"
                 f"Symbol: *${analysis['symbol'].upper()}*\n"
-                f"Pair: *{analysis['base_token']}*\n\n"
+                f"Pair: *{analysis['base_token']}*\n"
+                f"DEX: {analysis.get('dex_emoji', '🔷')} *{analysis.get('dex_name', 'Unknown')}*\n\n"
                 f"🧢 MC: {mc_str}     | ATH: {ath_str}\n"
                 f"💧 Liq: {liq_str}\n"
                 f"🏷 Price: {price_str}\n"
@@ -642,7 +737,8 @@ async def send_launch_alert(app: Application, analysis: dict):
         f"└─────────────────────┘\n\n"
         f"Name: *{analysis['name']}*\n"
         f"Symbol: *${analysis['symbol'].upper()}*\n"
-        f"Pair: *{analysis['base_token']}*\n\n"
+        f"Pair: *{analysis['base_token']}*\n"
+        f"DEX: {analysis.get('dex_emoji', '🔷')} *{analysis.get('dex_name', 'Unknown')}*\n\n"
         f"🧢 MC: {mc_str}\n"
         f"💧 Liq: {liq_str}\n"
         f"🏷 Price: {price_str}\n"
@@ -2284,7 +2380,15 @@ async def scan_loop(app: Application):
 
                 # Analyze the token with premium analytics enabled
                 # (Premium analytics will be included in the data, sent only to premium users)
-                analysis = analyze_token(pair_address, pair['token0'], pair['token1'], premium_analytics=True)
+                analysis = analyze_token(
+                    pair_address, 
+                    pair['token0'], 
+                    pair['token1'], 
+                    premium_analytics=True,
+                    dex_name=pair.get('dex_name', 'Unknown'),
+                    dex_emoji=pair.get('dex_emoji', '🔷'),
+                    dex_id=pair.get('dex_id', 'unknown')
+                )
 
                 if analysis:
                     logger.info(f"🚀 New launch detected: ${analysis['symbol']} ({analysis['name']})")
