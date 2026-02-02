@@ -670,46 +670,58 @@ async def send_launch_alert(app: Application, analysis: dict):
 
     sent_count = 0
 
+    # Get price change emoji
+    price_change = metrics.get('price_change_24h', 0)
+    change_emoji = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪"
+    change_str = f"{change_emoji} {'+' if price_change > 0 else ''}{price_change:.2f}%"
+    
+    # Calculate time since release
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    pair_created_at = metrics.get('pair_created_at', 0)
+    if pair_created_at > 0:
+        created_time = datetime.fromtimestamp(pair_created_at / 1000, tz=timezone.utc)
+        time_diff = now - created_time
+        if time_diff.total_seconds() < 3600:
+            release_time = f"{int(time_diff.total_seconds() / 60)}m"
+        elif time_diff.total_seconds() < 86400:
+            release_time = f"{int(time_diff.total_seconds() / 3600)}h"
+        else:
+            release_time = f"{int(time_diff.total_seconds() / 86400)}d"
+        release_date = created_time.strftime("%b %d, %Y")
+    else:
+        release_time = "Just now"
+        release_date = now.strftime("%b %d, %Y")
+    
     # PRIORITY ALERTS: Send to premium users FIRST (5-10 seconds faster)
     for user in premium_users:
         try:
             message = (
-                f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-                f"┃                                                    ┃\n"
-                f"┃    🚀 *NEW LAUNCH* 💎       ┃\n"
-                f"┃                                                    ┃\n"
-                f"┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-                f"*PREMIUM ALERT - Priority Delivery*\n\n"
-                f"┌─────────────────────┐\n"
-                f"│  💎 *TOKEN INFO*     │\n"
-                f"└─────────────────────┘\n\n"
-                f"Name: *{analysis['name']}*\n"
-                f"Symbol: *${analysis['symbol'].upper()}*\n"
-                f"Pair: *{analysis['base_token']}*\n"
-                f"DEX: {analysis.get('dex_emoji', '🔷')} *{analysis.get('dex_name', 'Unknown')}*\n\n"
-                f"🧢 MC: {mc_str}     | ATH: {ath_str}\n"
-                f"💧 Liq: {liq_str}\n"
-                f"🏷 Price: {price_str}\n"
-                f"🎚 Vol: {vol_str}\n\n"
-                f"┌─────────────────────┐\n"
-                f"│  🛡️ *SAFETY CHECKS*  │\n"
-                f"└─────────────────────┘\n\n"
-                f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n"
-                f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: *{'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}*\n"
-                f"{'✅' if analysis.get('liquidity_locked') else '❌'} LP Locked: *{'YES' if analysis.get('liquidity_locked') else 'NO'}*"
+                f"🚀 *NEW TOKEN LAUNCH* 💎\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"*{analysis['name']}* (${analysis['symbol'].upper()})\n\n"
+                f"📊 *LIVE MARKET DATA*\n"
+                f"💰 Price: {price_str}\n"
+                f"🏦 Market Cap: {mc_str}\n"
+                f"📊 Volume (24h): {vol_str}\n"
+                f"💧 Liquidity: {liq_str}\n"
+                f"📉 Change (24h): {change_str}\n"
+                f"🏪 DEX: {analysis.get('dex_name', 'Unknown')} {analysis.get('dex_emoji', '🔷')}\n"
+                f"🚀 Release: {release_date} ({release_time})\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"🛡️ *SAFETY CHECKS*\n"
+                f"{status_emoji} Ownership: {'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}\n"
+                f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: {'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}\n"
+                f"{'✅' if analysis.get('liquidity_locked') else '❌'} LP Locked: {'YES' if analysis.get('liquidity_locked') else 'NO'}"
             )
             
             if analysis.get('liquidity_locked'):
-                message += f"\n   └ {analysis.get('lock_days', 0)} days via {analysis.get('locker_name', 'Unknown')}"
+                message += f" ({analysis.get('lock_days', 0)} days)"
             
             message += (
-                f"\n\n🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
-                f"⚖️ {metrics['limit_details']}\n"
-                f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
-                f"🪂 Airdrops: {airdrop_str}\n\n"
-                f"┌─────────────────────┐\n"
-                f"│  📍 *CONTRACT*       │\n"
-                f"└─────────────────────┘\n\n"
+                f"\n🏧 Taxes: B:{buy_tax:.1f}% S:{sell_tax:.1f}%\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"📍 *CONTRACT*\n"
                 f"`{analysis['token_address']}`\n\n"
                 f"⚠️ *DYOR! Not financial advice.*"
             )
@@ -728,36 +740,24 @@ async def send_launch_alert(app: Application, analysis: dict):
 
     # Standard message for free users
     free_message = (
-        f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        f"┃                                                    ┃\n"
-        f"┃      🚀 *NEW LAUNCH*          ┃\n"
-        f"┃                                                    ┃\n"
-        f"┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  💎 *TOKEN INFO*     │\n"
-        f"└─────────────────────┘\n\n"
-        f"Name: *{analysis['name']}*\n"
-        f"Symbol: *${analysis['symbol'].upper()}*\n"
-        f"Pair: *{analysis['base_token']}*\n"
-        f"DEX: {analysis.get('dex_emoji', '🔷')} *{analysis.get('dex_name', 'Unknown')}*\n\n"
-        f"🧢 MC: {mc_str}\n"
-        f"💧 Liq: {liq_str}\n"
-        f"🏷 Price: {price_str}\n"
-        f"🎚 Vol: {vol_str}\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  🛡️ *SAFETY CHECKS*  │\n"
-        f"└─────────────────────┘\n\n"
-        f"{status_emoji} Ownership: *{'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}*\n"
-        f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: *{'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}*\n"
-        f"{'✅' if analysis.get('liquidity_locked') else '❌'} LP Locked: *{'YES' if analysis.get('liquidity_locked') else 'NO'}*\n\n"
-        f"🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
-        f"⚖️ {metrics['limit_details']}\n"
-        f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  📍 *CONTRACT*       │\n"
-        f"└─────────────────────┘\n\n"
-        f"`{analysis['token_address']}`\n\n"
-        f"💡 *Upgrade for ATH tracking & airdrops!*\n\n"
+        f"🚀 *NEW TOKEN LAUNCH*\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"*{analysis['name']}* (${analysis['symbol'].upper()})\n\n"
+        f"📊 *LIVE MARKET DATA*\n"
+        f"💰 Price: {price_str}\n"
+        f"🏦 Market Cap: {mc_str}\n"
+        f"📊 Volume (24h): {vol_str}\n"
+        f"💧 Liquidity: {liq_str}\n"
+        f"📉 Change (24h): {change_str}\n"
+        f"🏪 DEX: {analysis.get('dex_name', 'Unknown')} {analysis.get('dex_emoji', '🔷')}\n"
+        f"🚀 Release: {release_date} ({release_time})\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"🛡️ *SAFETY*\n"
+        f"{status_emoji} Ownership: {'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}\n"
+        f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: {'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"📍 `{analysis['token_address']}`\n\n"
+        f"💡 *Upgrade to Premium for advanced metrics!*\n"
         f"⚠️ *DYOR! Not financial advice.*"
     )
 
