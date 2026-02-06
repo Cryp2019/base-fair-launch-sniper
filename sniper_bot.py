@@ -8,12 +8,9 @@ import sys
 import asyncio
 import logging
 import time
-from datetime import datetime
-from web3 import Web3
-import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from datetime import datetime, timezone
 from database import UserDatabase
+from scoring import calculate_token_scores, format_score
 from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
@@ -693,6 +690,9 @@ async def send_launch_alert(app: Application, analysis: dict):
         release_time = "Just now"
         release_date = now.strftime("%b %d, %Y")
     
+    # Calculate token scores
+    scores = calculate_token_scores(analysis, metrics)
+    
     # PRIORITY ALERTS: Send to premium users FIRST (5-10 seconds faster)
     for user in premium_users:
         try:
@@ -708,6 +708,12 @@ async def send_launch_alert(app: Application, analysis: dict):
                 f"📉 Change (24h): {change_str}\n"
                 f"🏪 DEX: {analysis.get('dex_name', 'Unknown')} {analysis.get('dex_emoji', '🔷')}\n"
                 f"🚀 Release: {release_date} ({release_time})\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🎱 *TOKEN SCORES*\n"
+                f"📱 Social Score: {format_score(scores['social_score'])}\n"
+                f"🚀 Viral Score: {format_score(scores['viral_score'])}\n"
+                f"🔒 Security Score: {format_score(scores['security_score'])}\n"
+                f"⭐️ Overall Score: {format_score(scores['overall_score'])}\n"
                 f"━━━━━━━━━━━━━━━━\n\n"
                 f"🛡️ *SAFETY CHECKS*\n"
                 f"{status_emoji} Ownership: {'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}\n"
