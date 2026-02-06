@@ -2890,7 +2890,8 @@ async def main():
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("buy", buy_command))`r`n    app.add_handler(CommandHandler("earnings", earnings_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("earnings", earnings_command))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
