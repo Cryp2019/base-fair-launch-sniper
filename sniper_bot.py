@@ -367,6 +367,11 @@ def parse_pair_event(log, dex_type: str, dex_id: str, config: dict) -> dict:
 def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics: bool = False, dex_name: str = "Unknown", dex_emoji: str = "🔷", dex_id: str = "unknown") -> dict:
     """Analyze a new token launch"""
     try:
+        # Convert addresses to checksum format (Web3.py requirement)
+        pair_address = w3.to_checksum_address(pair_address)
+        token0 = w3.to_checksum_address(token0)
+        token1 = w3.to_checksum_address(token1)
+        
         # Identify the new token (not USDC/WETH)
         if token0.lower() == USDC_ADDRESS or token0.lower() == WETH_ADDRESS:
             new_token = token1
