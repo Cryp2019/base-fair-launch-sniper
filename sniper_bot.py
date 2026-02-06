@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from web3 import Web3
 import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from database import UserDatabase
 from trading import TradingBot
 from security_scanner import SecurityScanner
