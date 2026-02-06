@@ -1228,7 +1228,9 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             private_key,
             eth_amount,
             fee_wallet=admin_manager.fee_wallet,
-            fee_percentage=admin_manager.fee_percentage
+            fee_percentage=admin_manager.fee_percentage,
+            user_id=user.id,
+            db=db
         )
         
         if result['success']:
@@ -1238,7 +1240,10 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Check if referrer should be upgraded to premium
             if referrer_id:
                 if db.check_and_upgrade_premium(referrer_id):
-                    # Notify referrer they got premium
+                    # Start commission period
+                    db.start_referral_commission(referrer_id)
+                    
+                    # Notify referrer they got premium + commission
                     try:
                         await context.bot.send_message(
                             chat_id=referrer_id,
@@ -1246,7 +1251,18 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "🎉 *CONGRATULATIONS!*\n\n"
                                 "One of your referrals just made their first trade!\n"
                                 "You've reached *10 active referrals*!\n\n"
-                                "✅ You've been upgraded to *PREMIUM* for 1 month! 💎"
+                                "✅ *PREMIUM UNLOCKED* for 1 month! 💎\n"
+                                "💰 *COMMISSION UNLOCKED* for 30 days!\n\n"
+                                "━━━━━━━━━━━━━━━━\n"
+                                "💸 *EARN 5% OF TRADING FEES*\n"
+                                "━━━━━━━━━━━━━━━━\n\n"
+                                "You'll earn 5% of the 0.5% trading fee from your referrals!\n\n"
+                                "Example: If your referral trades 1 ETH:\n"
+                                "• Trading fee: 0.005 ETH\n"
+                                "• Your commission: 0.00025 ETH\n"
+                                "• Sent directly to your wallet!\n\n"
+                                "Commission expires in 30 days.\n"
+                                "Use /earnings to track your earnings! 🚀"
                             ),
                             parse_mode='Markdown'
                         )
@@ -1280,6 +1296,56 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Please try again or contact support.",
             parse_mode='Markdown'
         )
+
+
+async def earnings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show referral earnings and commission stats"""
+    user = update.effective_user
+    
+    # Check if user has commission active
+    if not db.is_commission_active(user.id):
+        await update.message.reply_text(
+            "💰 *REFERRAL EARNINGS*\n\n"
+            "You don't have active commissions yet.\n\n"
+            "To unlock commissions:\n"
+            "1. Refer 10 users who make trades\n"
+            "2. Get upgraded to Premium\n"
+            "3. Earn 5% of trading fees for 30 days!\n\n"
+            "Share your referral link to start earning! 🚀",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Get commission stats
+    stats = db.get_commission_stats(user.id)
+    commissions = db.get_referrer_commissions(user.id)
+    
+    # Build message
+    msg = (
+        f"💰 *REFERRAL EARNINGS*\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📊 *STATISTICS*\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"Total Earned: `{stats['total_earned']:.6f} ETH`\n"
+        f"Total Trades: `{stats['total_trades']}`\n"
+        f"Days Remaining: `{stats['days_remaining']}`\n\n"
+    )
+    
+    # Show recent commissions
+    if commissions:
+        msg += "━━━━━━━━━━━━━━━━\n"
+        msg += "📝 *RECENT COMMISSIONS*\n"
+        msg += "━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, comm in enumerate(commissions[:5]):  # Show last 5
+            msg += f"• `{comm['commission_amount_eth']:.6f} ETH`\n"
+            if i >= 4:
+                break
+    
+    msg += "\n━━━━━━━━━━━━━━━━\n"
+    msg += "Keep referring to earn more! 🚀"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 async def howitworks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2824,7 +2890,7 @@ async def main():
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("buy", buy_command))`r`n    app.add_handler(CommandHandler("earnings", earnings_command))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
@@ -2883,4 +2949,6 @@ if __name__ == '__main__':
         logger.error(f"❌ Fatal error: {e}")
         import traceback
         traceback.print_exc()
+
+
 

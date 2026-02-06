@@ -102,6 +102,29 @@ class UserDatabase:
                     FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             ''')
+            
+            # Referral commissions table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS referral_commissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_id INTEGER NOT NULL,
+                    referred_user_id INTEGER NOT NULL,
+                    trade_tx_hash TEXT NOT NULL,
+                    commission_amount_eth REAL NOT NULL,
+                    commission_sent_tx_hash TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (referrer_id) REFERENCES users(user_id),
+                    FOREIGN KEY (referred_user_id) REFERENCES users(user_id)
+                )
+            ''')
+            
+            # Add commission_start_date column to users table if it doesn't exist
+            try:
+                cursor.execute('ALTER TABLE users ADD COLUMN commission_start_date TIMESTAMP')
+                logger.info("✅ Added commission_start_date column to users table")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
 
             conn.commit()
             conn.close()
@@ -440,7 +463,100 @@ class UserDatabase:
         cursor.execute('UPDATE users SET alerts_enabled = ? WHERE user_id = ?', (new_state, user_id))
         conn.commit()
         conn.close()
-        return bool(new_state)
+        return new_state
+    
+    # ===== COMMISSION TRACKING FUNCTIONS =====
+    
+    def start_referral_commission(self, user_id: int):
+        """Start 30-day commission period for referrer"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET commission_start_date = ? WHERE user_id = ?',
+            (datetime.now().isoformat(), user_id)
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"💰 Started commission period for user {user_id}")
+    
+    def is_commission_active(self, user_id: int) -> bool:
+        """Check if referrer's 30-day commission period is active"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT commission_start_date FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result or not result[0]:
+            return False
+        
+        start_date = datetime.fromisoformat(result[0])
+        days_elapsed = (datetime.now() - start_date).days
+        
+        return days_elapsed < 30
+    
+    def log_commission(self, referrer_id: int, referred_user_id: int, 
+                      trade_tx_hash: str, commission_amount: float, 
+                      commission_tx_hash: str = None):
+        """Log commission payment"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO referral_commissions 
+            (referrer_id, referred_user_id, trade_tx_hash, commission_amount_eth, commission_sent_tx_hash)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (referrer_id, referred_user_id, trade_tx_hash, commission_amount, commission_tx_hash))
+        conn.commit()
+        conn.close()
+        logger.info(f"💰 Logged commission: {commission_amount} ETH for referrer {referrer_id}")
+    
+    def get_referrer_commissions(self, user_id: int) -> List[Dict]:
+        """Get all commissions earned by referrer"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM referral_commissions 
+            WHERE referrer_id = ? 
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        commissions = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return commissions
+    
+    def get_commission_stats(self, user_id: int) -> Dict:
+        """Get commission statistics for referrer"""
+        commissions = self.get_referrer_commissions(user_id)
+        total_earned = sum(c['commission_amount_eth'] for c in commissions)
+        
+        # Calculate days remaining
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT commission_start_date FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        days_remaining = 0
+        if result and result[0]:
+            start_date = datetime.fromisoformat(result[0])
+            days_elapsed = (datetime.now() - start_date).days
+            days_remaining = max(0, 30 - days_elapsed)
+        
+        return {
+            'total_earned': total_earned,
+            'total_trades': len(commissions),
+            'days_remaining': days_remaining,
+            'is_active': days_remaining > 0
+        }
+    
+    def get_referrer(self, user_id: int) -> Optional[int]:
+        """Get the referrer ID for a user"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT referrer_id FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result and result[0] else None
 
     def get_users_with_alerts(self) -> List[Dict]:
         """Get all users with alerts enabled"""

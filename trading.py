@@ -123,7 +123,7 @@ class TradingBot:
                 'message': str(e)
             }
     
-    def buy_token(self, token_address: str, private_key: str, eth_amount: float, slippage: float = 10.0, fee_wallet: str = None, fee_percentage: float = 0.0) -> dict:
+    def buy_token(self, token_address: str, private_key: str, eth_amount: float, slippage: float = 10.0, fee_wallet: str = None, fee_percentage: float = 0.0, user_id: int = None, db = None) -> dict:
         """
         Buy token with ETH via Uniswap V3
         
@@ -132,6 +132,10 @@ class TradingBot:
             private_key: User's private key
             eth_amount: Amount of ETH to spend
             slippage: Slippage tolerance in percentage (default 10%)
+            fee_wallet: Bot fee wallet address
+            fee_percentage: Fee percentage (default 0.5%)
+            user_id: User ID for commission tracking
+            db: Database instance for commission tracking
         
         Returns:
             dict with success status, tx_hash, and details
@@ -141,32 +145,91 @@ class TradingBot:
             token_checksum = Web3.to_checksum_address(token_address)
             weth_checksum = Web3.to_checksum_address(WETH_ADDRESS)
 
+            current_nonce = self.w3.eth.get_transaction_count(account.address)
+
             # Calculate fee if applicable
             fee_amount_eth = 0
             net_eth_amount = eth_amount
+            commission_tx_hash = None
 
             if fee_wallet and fee_percentage > 0:
                 fee_amount_eth = eth_amount * (fee_percentage / 100)
                 net_eth_amount = eth_amount - fee_amount_eth
 
-                # Send fee to fee wallet
-                try:
-                    fee_amount_wei = self.w3.to_wei(fee_amount_eth, 'ether')
-                    fee_tx = {
-                        'from': account.address,
-                        'to': Web3.to_checksum_address(fee_wallet),
-                        'value': fee_amount_wei,
-                        'gas': 21000,
-                        'gasPrice': self.w3.eth.gas_price,
-                        'nonce': self.w3.eth.get_transaction_count(account.address),
-                        'chainId': 8453
-                    }
-                    signed_fee_tx = self.w3.eth.account.sign_transaction(fee_tx, private_key)
-                    fee_tx_hash = self.w3.eth.send_raw_transaction(signed_fee_tx.rawTransaction)
-                    logger.info(f"💰 Fee collected: {fee_amount_eth} ETH - TX: {fee_tx_hash.hex()}")
-                except Exception as e:
-                    logger.error(f"Fee collection failed: {e}")
-                    # Continue with trade even if fee fails
+                # Check if user has active referrer with commission
+                referrer_id = None
+                if user_id and db:
+                    referrer_id = db.get_referrer(user_id)
+                
+                if referrer_id and db and db.is_commission_active(referrer_id):
+                    # Split fee: 95% bot, 5% referrer
+                    bot_fee = fee_amount_eth * 0.95
+                    referrer_commission = fee_amount_eth * 0.05
+                    
+                    logger.info(f"💰 Splitting fee - Bot: {bot_fee} ETH, Referrer: {referrer_commission} ETH")
+                    
+                    # Send bot fee
+                    try:
+                        bot_fee_wei = self.w3.to_wei(bot_fee, 'ether')
+                        bot_fee_tx = {
+                            'from': account.address,
+                            'to': Web3.to_checksum_address(fee_wallet),
+                            'value': bot_fee_wei,
+                            'gas': 21000,
+                            'gasPrice': self.w3.eth.gas_price,
+                            'nonce': current_nonce,
+                            'chainId': 8453
+                        }
+                        signed_bot_fee_tx = self.w3.eth.account.sign_transaction(bot_fee_tx, private_key)
+                        bot_fee_tx_hash = self.w3.eth.send_raw_transaction(signed_bot_fee_tx.rawTransaction)
+                        logger.info(f"💰 Bot fee sent: {bot_fee} ETH - TX: {bot_fee_tx_hash.hex()}")
+                        current_nonce += 1 # Increment nonce for next transaction
+                    except Exception as e:
+                        logger.error(f"Bot fee collection failed: {e}")
+                    
+                    # Send referrer commission
+                    try:
+                        referrer_wallets = db.get_user_wallets(referrer_id)
+                        if referrer_wallets:
+                            referrer_wallet = referrer_wallets[0]['wallet_address']
+                            commission_wei = self.w3.to_wei(referrer_commission, 'ether')
+                            commission_tx = {
+                                'from': account.address,
+                                'to': Web3.to_checksum_address(referrer_wallet),
+                                'value': commission_wei,
+                                'gas': 21000,
+                                'gasPrice': self.w3.eth.gas_price,
+                                'nonce': current_nonce,
+                                'chainId': 8453
+                            }
+                            signed_commission_tx = self.w3.eth.account.sign_transaction(commission_tx, private_key)
+                            commission_tx_hash_result = self.w3.eth.send_raw_transaction(signed_commission_tx.rawTransaction)
+                            commission_tx_hash = commission_tx_hash_result.hex()
+                            logger.info(f"💰 Referrer commission sent: {referrer_commission} ETH - TX: {commission_tx_hash}")
+                            current_nonce += 1 # Increment nonce for next transaction
+                    except Exception as e:
+                        logger.error(f"Referrer commission failed: {e}")
+                else:
+                    # Send full fee to bot wallet
+                    try:
+                        fee_amount_wei = self.w3.to_wei(fee_amount_eth, 'ether')
+                        fee_tx = {
+                            'from': account.address,
+                            'to': Web3.to_checksum_address(fee_wallet),
+                            'value': fee_amount_wei,
+                            'gas': 21000,
+                            'gasPrice': self.w3.eth.gas_price,
+                            'nonce': current_nonce,
+                            'chainId': 8453
+                        }
+                        signed_fee_tx = self.w3.eth.account.sign_transaction(fee_tx, private_key)
+                        fee_tx_hash = self.w3.eth.send_raw_transaction(signed_fee_tx.rawTransaction)
+                        logger.info(f"💰 Fee collected: {fee_amount_eth} ETH - TX: {fee_tx_hash.hex()}")
+                        current_nonce += 1 # Increment nonce for next transaction
+                    except Exception as e:
+                        logger.error(f"Fee collection failed: {e}")
+                        # Continue with trade even if fee fails
+
 
             # Convert net ETH amount to Wei
             amount_in = self.w3.to_wei(net_eth_amount, 'ether')
