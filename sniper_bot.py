@@ -3020,15 +3020,17 @@ async def main():
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
     
-    # Add group posting buy button handler
-    app.add_handler(CallbackQueryHandler(
-        group_poster.handle_buy_button_click,
-        pattern='^buy_'
-    ))
+    # Add group posting buy button handler (only if available)
+    if GROUP_POSTER_AVAILABLE and group_poster:
+        app.add_handler(CallbackQueryHandler(
+            group_poster.handle_buy_button_click,
+            pattern='^buy_'
+        ))
     
-    # Add handlers for automatic group detection
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
-    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
+    # Add handlers for automatic group detection (only if available)
+    if GROUP_POSTER_AVAILABLE:
+        app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
+        app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
 
     logger.info(f"✅ Bot username: @{BOT_USERNAME}")
     logger.info("✅ Database initialized")
