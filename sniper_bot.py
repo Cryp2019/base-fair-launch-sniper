@@ -29,9 +29,9 @@ if os.path.exists('.env'):
                     os.environ[key] = value
 
 # Configuration
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-BOT_USERNAME = os.getenv('BOT_USERNAME', 'BaseFairLaunchBot')
-ALCHEMY_KEY = os.getenv('ALCHEMY_API_KEY', '')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
+BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
+ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
 # Use BASE_RPC_URL from environment if set, otherwise fall back to Alchemy
 BASE_RPC = os.getenv('BASE_RPC_URL') or f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
 
