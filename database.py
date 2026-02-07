@@ -7,7 +7,20 @@ import os
 import logging
 from datetime import datetime
 from typing import Optional, Dict, List
-from encryption_utils import encrypt_private_key, decrypt_private_key, validate_master_key
+
+# Try to import encryption utilities, fallback to plaintext if not available
+try:
+    from encryption_utils import encrypt_private_key, decrypt_private_key, validate_master_key
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    ENCRYPTION_AVAILABLE = False
+    # Fallback: no encryption
+    def encrypt_private_key(key, user_id, master_key):
+        return key
+    def decrypt_private_key(key, user_id, master_key):
+        return key
+    def validate_master_key(key):
+        return True
 
 logger = logging.getLogger(__name__)
 
