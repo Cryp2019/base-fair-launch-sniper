@@ -18,6 +18,7 @@ from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
+from group_poster import GroupPoster
 
 # Load environment variables
 if os.path.exists('.env'):
@@ -115,6 +116,7 @@ else:
 trading_bot = TradingBot(w3)
 security_scanner = SecurityScanner(w3)
 admin_manager = AdminManager(db, w3)
+group_poster = GroupPoster(w3)  # Initialize group poster for group announcements
 
 # ===== SCORING FUNCTIONS =====
 
@@ -731,6 +733,60 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
 
 # ===== ALERT FUNCTIONS =====
 
+async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
+    """Post good-rated projects to bot's group with Buy Now button"""
+    try:
+        # Create project data for group poster
+        project_data = {
+            'name': analysis.get('name', 'Unknown'),
+            'contract': analysis.get('token_address'),
+            'id': analysis.get('pair_address'),
+            'dex': analysis.get('dex_name', 'Uniswap'),
+            'launch_time': datetime.now(timezone.utc).strftime("%H:%M UTC"),
+            'liquidity_usd': metrics.get('liquidity_usd', 0),
+            'market_cap': metrics.get('market_cap', 0),
+            'volume_24h': metrics.get('volume_24h', 0),
+        }
+        
+        # Check if project meets rating threshold
+        should_post, rating = group_poster.should_post_project(project_data)
+        
+        if should_post:
+            logger.info(f"✨ Project {project_data['contract']} rated {rating.get('score')}/100 - posting to all groups!")
+            
+            # Get all auto-detected groups
+            all_groups = db.get_all_groups()
+            
+            # Also check for manually configured GROUP_CHAT_ID
+            group_chat_id = os.getenv('GROUP_CHAT_ID')
+            if group_chat_id and group_chat_id.strip():
+                all_groups.append({'group_id': int(group_chat_id), 'group_name': 'manual', 'group_title': 'Manual Config'})
+            
+            if all_groups:
+                message_text = group_poster.format_project_message(project_data, rating)
+                reply_markup = group_poster.get_buy_button(
+                    project_data['contract'],
+                    project_data['id']
+                )
+                
+                # Post to each group
+                for group in all_groups:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=group['group_id'],
+                            text=message_text,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                        db.update_group_post_count(group['group_id'])
+                        logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to post to group {group['group_id']}: {e}")
+            else:
+                logger.info(f"No groups configured. Add bot to a group for auto-posting!")
+    except Exception as e:
+        logger.error(f"Error in group posting: {e}")
+
 async def send_launch_alert(app: Application, analysis: dict):
     """Send beautiful alert for new token launch - with premium features"""
 
@@ -929,6 +985,9 @@ async def send_launch_alert(app: Application, analysis: dict):
             logger.warning(f"Failed to send to user {user['user_id']}: {e}")
 
     logger.info(f"📢 Alert sent to {sent_count} users ({len(premium_users)} premium, {len(free_users)} free) for ${analysis['symbol']}")
+    
+    # Post to group if rating is good
+    await post_to_group_with_buy_button(app, analysis, metrics)
 
 # ===== BOT UI FUNCTIONS =====
 
@@ -2859,6 +2918,53 @@ async def scan_loop(app: Application):
             traceback.print_exc()
             await asyncio.sleep(60)  # Wait longer on error
 
+# ===== AUTO GROUP DETECTION HANDLERS =====
+
+async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle when bot is added to a group"""
+    try:
+        chat = update.effective_chat
+        if chat.type in ['group', 'supergroup']:
+            group_id = chat.id
+            group_name = chat.username or "private_group"
+            group_title = chat.title or "Group"
+            
+            # Add to database for auto-posting
+            db.add_group(group_id, group_name, group_title)
+            
+            logger.info(f"🎉 Bot added to group: {group_title} (ID: {group_id})")
+            
+            # Send welcome message
+            welcome_msg = (
+                f"👋 Hello! I'm the Base Fair Launch Sniper Bot\n\n"
+                f"✨ I will automatically post good-rated projects here!\n\n"
+                f"🛡️ Only projects with 75+ security rating will be posted\n"
+                f"💳 Click 'Buy Now' to execute instant trades\n\n"
+                f"📊 Group auto-enabled for posting!\n"
+                f"Waiting for new fair launches..."
+            )
+            
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=welcome_msg
+            )
+    except Exception as e:
+        logger.error(f"Error handling bot added to group: {e}")
+
+async def on_bot_removed_from_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle when bot is removed from a group"""
+    try:
+        chat = update.effective_chat
+        if chat.type in ['group', 'supergroup']:
+            group_id = chat.id
+            
+            # Remove from database
+            db.remove_group(group_id)
+            
+            logger.info(f"👋 Bot removed from group (ID: {group_id})")
+    except Exception as e:
+        logger.error(f"Error handling bot removed from group: {e}")
+
 # ===== MAIN =====
 
 async def main():
@@ -2897,9 +3003,21 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
+    
+    # Add group posting buy button handler
+    app.add_handler(CallbackQueryHandler(
+        group_poster.handle_buy_button_click,
+        pattern='^buy_'
+    ))
+    
+    # Add handlers for automatic group detection
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
 
     logger.info(f"✅ Bot username: @{BOT_USERNAME}")
     logger.info("✅ Database initialized")
+    logger.info("✅ Automatic group detection ENABLED")
+    logger.info("✅ Group posting will auto-enable when bot is added to groups")
 
     # Check payment wallet configuration
     payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS')

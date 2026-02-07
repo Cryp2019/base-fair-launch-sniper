@@ -1,0 +1,19 @@
+
+QUICK FIX - GROUP POSTING NOT WORKING
+======================================
+
+PROBLEM: GROUP_CHAT_ID is empty in .env
+
+SOLUTION:
+1. Get your group ID (add @userinfobot to group, it sends ID)
+2. Add to .env: GROUP_CHAT_ID=-1001234567890 (your ID)
+3. Save .env
+4. Restart bot: python sniper_bot.py
+
+VERIFICATION:
+1. Run: python diagnose_group_posting.py
+2. It will send test message to your group
+3. If you see it, everything works!
+
+DONE! Bot will now post good projects to your group.
+    

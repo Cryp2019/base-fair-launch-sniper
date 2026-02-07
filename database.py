@@ -7,11 +7,23 @@ import os
 import logging
 from datetime import datetime
 from typing import Optional, Dict, List
+from encryption_utils import encrypt_private_key, decrypt_private_key, validate_master_key
 
 logger = logging.getLogger(__name__)
 
 class UserDatabase:
     def __init__(self, db_path='users.db'):
+        # Load wallet encryption master key
+        self.master_key = os.getenv('WALLET_MASTER_KEY')
+        if not self.master_key:
+            logger.warning("⚠️  WALLET_MASTER_KEY not set - wallet encryption disabled!")
+            logger.warning("   Private keys will be stored in plaintext (INSECURE)")
+        elif not validate_master_key(self.master_key):
+            logger.error("❌ Invalid WALLET_MASTER_KEY format!")
+            raise ValueError("WALLET_MASTER_KEY must be a valid Fernet key")
+        else:
+            logger.info("🔐 Wallet encryption enabled")
+        
         # Determine database path based on environment
         if os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_PROJECT_ID'):
             # Running on Railway - use persistent volume path
@@ -125,6 +137,31 @@ class UserDatabase:
             except sqlite3.OperationalError:
                 # Column already exists
                 pass
+            
+            # Wallet access logging table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS wallet_access_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+            
+            # Group posting table - auto-detect groups bot is in
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS bot_groups (
+                    group_id INTEGER PRIMARY KEY,
+                    group_name TEXT,
+                    group_title TEXT,
+                    added_date TEXT,
+                    last_post_date TEXT,
+                    posting_enabled INTEGER DEFAULT 1,
+                    post_count INTEGER DEFAULT 0
+                )
+            ''')
 
             conn.commit()
             conn.close()
@@ -293,16 +330,27 @@ class UserDatabase:
         conn.close()
 
     def create_wallet(self, user_id: int, wallet_address: str, private_key: str) -> Dict:
-        """Create a new wallet for a user"""
+        """Create a new wallet for a user with encrypted private key"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
         try:
+            # Encrypt private key if master key is available
+            if self.master_key:
+                encrypted_key = encrypt_private_key(private_key, user_id, self.master_key)
+                logger.info(f"🔐 Encrypted private key for user {user_id}")
+            else:
+                encrypted_key = private_key
+                logger.warning(f"⚠️  Storing private key in PLAINTEXT for user {user_id}")
+            
             cursor.execute('''
                 INSERT INTO wallets (user_id, wallet_address, private_key, created_date)
                 VALUES (?, ?, ?, ?)
-            ''', (user_id, wallet_address, private_key, datetime.utcnow().isoformat()))
+            ''', (user_id, wallet_address, encrypted_key, datetime.utcnow().isoformat()))
 
+            # Log wallet creation
+            self._log_wallet_access(cursor, user_id, wallet_address, 'created')
+            
             conn.commit()
             conn.close()
             return {'success': True, 'wallet_address': wallet_address}
@@ -311,6 +359,7 @@ class UserDatabase:
             return {'success': False, 'message': 'Wallet already exists'}
         except Exception as e:
             conn.close()
+            logger.error(f"Wallet creation error: {e}")
             return {'success': False, 'message': str(e)}
 
     def get_user_wallets(self, user_id: int) -> List[Dict]:
@@ -574,3 +623,70 @@ class UserDatabase:
 
         conn.close()
         return users
+    
+    def add_group(self, group_id: int, group_name: str = None, group_title: str = None) -> bool:
+        """Add a group to auto-post list"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO bot_groups (group_id, group_name, group_title, added_date, posting_enabled)
+                VALUES (?, ?, ?, ?, 1)
+            ''', (group_id, group_name, group_title, datetime.now().isoformat()))
+            conn.commit()
+            conn.close()
+            logger.info(f"✅ Added group {group_id} to auto-posting list")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add group: {e}")
+            return False
+    
+    def remove_group(self, group_id: int) -> bool:
+        """Remove a group from auto-post list"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM bot_groups WHERE group_id = ?', (group_id,))
+            conn.commit()
+            conn.close()
+            logger.info(f"Removed group {group_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove group: {e}")
+            return False
+    
+    def get_all_groups(self) -> List[Dict]:
+        """Get all groups bot should post to"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT group_id, group_name, group_title, posting_enabled FROM bot_groups WHERE posting_enabled = 1')
+            groups = []
+            for row in cursor.fetchall():
+                groups.append({
+                    'group_id': row[0],
+                    'group_name': row[1],
+                    'group_title': row[2],
+                    'enabled': row[3]
+                })
+            conn.close()
+            return groups
+        except Exception as e:
+            logger.error(f"Failed to get groups: {e}")
+            return []
+    
+    def update_group_post_count(self, group_id: int):
+        """Update last post time and count for a group"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE bot_groups 
+                SET last_post_date = ?, post_count = post_count + 1
+                WHERE group_id = ?
+            ''', (datetime.now().isoformat(), group_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to update group: {e}")
+    
