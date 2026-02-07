@@ -18,7 +18,14 @@ from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
-from group_poster import GroupPoster
+
+# Try to import group poster (optional for group posting feature)
+try:
+    from group_poster import GroupPoster
+    GROUP_POSTER_AVAILABLE = True
+except ImportError:
+    GROUP_POSTER_AVAILABLE = False
+    GroupPoster = None
 
 # Load environment variables
 if os.path.exists('.env'):
@@ -116,7 +123,13 @@ else:
 trading_bot = TradingBot(w3)
 security_scanner = SecurityScanner(w3)
 admin_manager = AdminManager(db, w3)
-group_poster = GroupPoster(w3)  # Initialize group poster for group announcements
+
+# Initialize group poster if available
+if GROUP_POSTER_AVAILABLE:
+    group_poster = GroupPoster(w3)
+else:
+    group_poster = None
+    logger.warning("⚠️  GroupPoster not available - group posting disabled")
 
 # ===== SCORING FUNCTIONS =====
 
@@ -735,6 +748,9 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
 
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
     """Post good-rated projects to bot's group with Buy Now button"""
+    if not GROUP_POSTER_AVAILABLE or not group_poster:
+        return  # Group posting disabled
+    
     try:
         # Create project data for group poster
         project_data = {
