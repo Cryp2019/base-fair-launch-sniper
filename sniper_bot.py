@@ -814,7 +814,19 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         logger.error(f"Error in group posting: {e}")
 
 async def send_launch_alert(app: Application, analysis: dict):
-    """Send beautiful alert for new token launch - with premium features"""
+    """Send beautiful alert for new token launch - QUALITY FILTERED (80+ score only)"""
+
+    # STRICT QUALITY FILTER: Check security score FIRST
+    contract = analysis.get('token_address')
+    rating = security_scanner.get_project_rating(contract) if security_scanner else {}
+    score = rating.get('score', 0)
+    
+    MIN_QUALITY_SCORE = 80
+    if score < MIN_QUALITY_SCORE:
+        logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping alert.")
+        return  # Don't send alert for low-quality tokens
+    
+    logger.info(f"✨ HIGH QUALITY PROJECT: {analysis.get('name')} rated {score}/100 - SENDING ALERTS!")
 
     # Get all users with alerts enabled
     users = db.get_users_with_alerts()
