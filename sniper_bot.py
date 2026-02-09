@@ -18,6 +18,9 @@ from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
+from sponsored_projects import SponsoredProjects
+from automated_sponsorship import AutomatedSponsorshipProcessor
+from top_performers import register_top_performers_handlers
 
 # Try to import group poster (optional for group posting feature)
 try:
@@ -3032,6 +3035,18 @@ async def main():
     # Create application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Initialize sponsored projects tracking
+    sponsored_projects = SponsoredProjects('users.db')
+    
+    # Initialize automated sponsorship processor if payment wallet is configured
+    auto_sponsor = None
+    if payment_wallet:
+        auto_sponsor = AutomatedSponsorshipProcessor(
+            db=db,
+            sponsored_projects=sponsored_projects,
+            payment_wallet=payment_wallet
+        )
+
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -3041,6 +3056,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
+    
+    # Register top performers handlers
+    register_top_performers_handlers(app, sponsored_projects)
     
     # Add group posting buy button handler (only if available)
     if GROUP_POSTER_AVAILABLE and group_poster:
@@ -3085,8 +3103,17 @@ async def main():
     if payment_wallet:
         try:
             payment_monitor = PaymentMonitor(w3, db, payment_wallet, app)
+            
+            # Connect payment monitor to sponsorship processor
+            if auto_sponsor:
+                async def on_payment_detected(payment_data):
+                    """Handle incoming USDC payments"""
+                    await auto_sponsor.process_payment(payment_data)
+                
+                payment_monitor.on_payment_received = on_payment_detected
+            
             payment_monitor_task = asyncio.create_task(payment_monitor.start_monitoring())
-            logger.info("💰 Payment monitor started - auto-upgrades enabled!")
+            logger.info("💰 Payment monitor started - auto-upgrades & sponsorships enabled!")
         except Exception as e:
             logger.error(f"Failed to start payment monitor: {e}")
 
