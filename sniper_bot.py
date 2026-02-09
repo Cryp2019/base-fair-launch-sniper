@@ -18,9 +18,19 @@ from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
-from sponsored_projects import SponsoredProjects
-from automated_sponsorship import AutomatedSponsorshipProcessor
-from top_performers import register_top_performers_handlers
+
+# Try to import sponsorship modules (optional for premium features)
+try:
+    from sponsored_projects import SponsoredProjects
+    from automated_sponsorship import AutomatedSponsorshipProcessor
+    from top_performers import register_top_performers_handlers
+    SPONSORSHIP_AVAILABLE = True
+except ImportError as e:
+    SPONSORSHIP_AVAILABLE = False
+    logger.warning(f"⚠️ Sponsorship modules not available: {e}")
+    SponsoredProjects = None
+    AutomatedSponsorshipProcessor = None
+    register_top_performers_handlers = None
 
 # Try to import group poster (optional for group posting feature)
 try:
@@ -3035,17 +3045,25 @@ async def main():
     # Create application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Initialize sponsored projects tracking
-    sponsored_projects = SponsoredProjects('users.db')
+    # Initialize sponsored projects tracking (if available)
+    sponsored_projects = None
+    if SPONSORSHIP_AVAILABLE:
+        try:
+            sponsored_projects = SponsoredProjects('users.db')
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialize sponsorship system: {e}")
     
     # Initialize automated sponsorship processor if payment wallet is configured
     auto_sponsor = None
-    if payment_wallet:
-        auto_sponsor = AutomatedSponsorshipProcessor(
-            db=db,
-            sponsored_projects=sponsored_projects,
-            payment_wallet=payment_wallet
-        )
+    if SPONSORSHIP_AVAILABLE and payment_wallet and sponsored_projects:
+        try:
+            auto_sponsor = AutomatedSponsorshipProcessor(
+                db=db,
+                sponsored_projects=sponsored_projects,
+                payment_wallet=payment_wallet
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialize automated sponsorship: {e}")
 
     # Add handlers
     app.add_handler(CommandHandler("start", start))
@@ -3057,8 +3075,12 @@ async def main():
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
     
-    # Register top performers handlers
-    register_top_performers_handlers(app, sponsored_projects)
+    # Register top performers handlers (if available)
+    if SPONSORSHIP_AVAILABLE and register_top_performers_handlers:
+        try:
+            register_top_performers_handlers(app, sponsored_projects)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not register top performers handlers: {e}")
     
     # Add group posting buy button handler (only if available)
     if GROUP_POSTER_AVAILABLE and group_poster:
