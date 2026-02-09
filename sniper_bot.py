@@ -19,6 +19,10 @@ from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
 
+# Setup logging early for import errors
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Try to import sponsorship modules (optional for premium features)
 try:
     from sponsored_projects import SponsoredProjects
@@ -114,13 +118,6 @@ FACTORIES = {
 
 # Keep old FACTORY_ADDRESS for backward compatibility
 FACTORY_ADDRESS = FACTORIES['uniswap_v3']['address']
-
-# Setup logging first
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Initialize
 logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
