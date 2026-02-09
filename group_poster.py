@@ -9,6 +9,12 @@ from telegram.ext import ContextTypes
 from security_scanner import SecurityScanner
 from trading import TradingBot
 
+try:
+    from base_scanner_design import format_premium_token_alert, format_ultra_premium_alert, format_minimal_alert
+    PREMIUM_DESIGN_AVAILABLE = True
+except ImportError:
+    PREMIUM_DESIGN_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class GroupPoster:
@@ -33,9 +39,36 @@ class GroupPoster:
     
     def format_project_message(self, project: dict, rating: dict) -> str:
         """Format project data into a nice Telegram message"""
+        # Use premium design if available, otherwise fallback
+        if PREMIUM_DESIGN_AVAILABLE:
+            token_data = {
+                'name': project.get('name', 'Unknown'),
+                'symbol': project.get('symbol', 'N/A'),
+                'contract': project.get('contract', 'N/A'),
+                'dex': project.get('dex', 'Uniswap')
+            }
+            
+            analysis = {
+                'security_score': rating.get('score', 0),
+                'risk_level': rating.get('risk_level', 'UNKNOWN'),
+                'ownership_status': rating.get('ownership_status', 'Unknown'),
+                'honeypot_status': rating.get('honeypot_status', 'Unknown'),
+                'lp_lock_status': rating.get('lp_lock_status', 'Unknown'),
+                'tax_status': rating.get('tax_status', 'Unknown')
+            }
+            
+            metrics = {
+                'market_cap': project.get('market_cap', 0),
+                'liquidity_usd': project.get('liquidity_usd', 0),
+                'volume_24h': project.get('volume_24h', 0),
+                'volume_1h': project.get('volume_1h', 0)
+            }
+            
+            return format_premium_token_alert(token_data, analysis, metrics)
+        
+        # Fallback to simple format
         token_name = project.get('name', 'Unknown')
         contract = project.get('contract', 'N/A')
-        launch_time = project.get('launch_time', 'N/A')
         dex = project.get('dex', 'Uniswap')
         liquidity = project.get('liquidity_usd', 0)
         market_cap = project.get('market_cap', 0)
@@ -52,7 +85,6 @@ class GroupPoster:
 💰 <b>MARKET DATA:</b>
 • Liquidity: ${liquidity:,.0f}
 • Market Cap: ${market_cap:,.0f}
-• Launch: {launch_time}
 
 🛡️ <b>SECURITY RATING:</b> {score}/100
 <b>Risk Level:</b> {risk_level.upper()}
