@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Try to import sponsorship modules (optional for premium features)
 try:
-    from sponsored_projects import SponsoredProjects
-    from automated_sponsorship import AutomatedSponsorshipProcessor
-    from top_performers import register_top_performers_handlers
+    from project_sponsors import SponsoredProjects
+    from sponsorship_processor import AutomatedSponsorshipProcessor
+    from performers_tracker import register_top_performers_handlers
     SPONSORSHIP_AVAILABLE = True
 except ImportError as e:
     SPONSORSHIP_AVAILABLE = False
