@@ -37,8 +37,8 @@ class GroupPoster:
         
         self.min_rating_score = 75  # Only post projects with 75+ score
     
-    def format_project_message(self, project: dict, rating: dict) -> str:
-        """Format project data into a nice Telegram message"""
+    def format_project_message(self, project: dict, rating: dict, analysis: dict = None) -> str:
+        """Format project data with premium Base chain scanner design"""
         # Use premium design if available, otherwise fallback
         if PREMIUM_DESIGN_AVAILABLE:
             token_data = {
@@ -48,14 +48,32 @@ class GroupPoster:
                 'dex': project.get('dex', 'Uniswap')
             }
             
-            analysis = {
-                'security_score': rating.get('score', 0),
-                'risk_level': rating.get('risk_level', 'UNKNOWN'),
-                'ownership_status': rating.get('ownership_status', 'Unknown'),
-                'honeypot_status': rating.get('honeypot_status', 'Unknown'),
-                'lp_lock_status': rating.get('lp_lock_status', 'Unknown'),
-                'tax_status': rating.get('tax_status', 'Unknown')
-            }
+            if analysis:
+                analysis_data = {
+                    'security_score': rating.get('score', 0),
+                    'risk_level': rating.get('risk_level', 'UNKNOWN'),
+                    'ownership_status': '✅ Renounced' if analysis.get('owner_renounced') else '⚠️ Active',
+                    'honeypot_status': '✅ Clear' if not analysis.get('is_honeypot') else '⚠️ Honeypot',
+                    'lp_lock_status': '✅ Locked' if analysis.get('lp_locked') else '⚠️ Unlocked',
+                    'tax_status': f"{analysis.get('tax_buy', 0)}% Buy / {analysis.get('tax_sell', 0)}% Sell",
+                    'owner_renounced': analysis.get('owner_renounced', False),
+                    'no_honeypot': not analysis.get('is_honeypot', False),
+                    'lp_locked': analysis.get('lp_locked', False),
+                    'tax': f"{analysis.get('tax_buy', 0)}%"
+                }
+            else:
+                analysis_data = {
+                    'security_score': rating.get('score', 0),
+                    'risk_level': rating.get('risk_level', 'UNKNOWN'),
+                    'ownership_status': 'Unknown',
+                    'honeypot_status': 'Unknown',
+                    'lp_lock_status': 'Unknown',
+                    'tax_status': 'Unknown',
+                    'owner_renounced': False,
+                    'no_honeypot': True,
+                    'lp_locked': False,
+                    'tax': 'N/A'
+                }
             
             metrics = {
                 'market_cap': project.get('market_cap', 0),
@@ -64,7 +82,7 @@ class GroupPoster:
                 'volume_1h': project.get('volume_1h', 0)
             }
             
-            return format_premium_token_alert(token_data, analysis, metrics)
+            return format_premium_token_alert(token_data, analysis_data, metrics)
         
         # Fallback to simple format
         token_name = project.get('name', 'Unknown')

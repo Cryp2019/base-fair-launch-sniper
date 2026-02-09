@@ -747,59 +747,69 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
 # ===== ALERT FUNCTIONS =====
 
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
-    """Post good-rated projects to bot's group with Buy Now button"""
+    """Post QUALITY projects to bot's group with Buy Now button"""
     if not GROUP_POSTER_AVAILABLE or not group_poster:
         return  # Group posting disabled
     
     try:
-        # Create project data for group poster
+        # Get security rating first
+        contract = analysis.get('token_address')
+        rating = security_scanner.get_project_rating(contract) if security_scanner else {}
+        score = rating.get('score', 0)
+        
+        # STRICT QUALITY FILTER: Only post projects with 80+ security score
+        MIN_QUALITY_SCORE = 80
+        if score < MIN_QUALITY_SCORE:
+            logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping group post.")
+            return
+        
+        logger.info(f"✨ HIGH QUALITY PROJECT: {analysis.get('name')} rated {score}/100 - POSTING TO GROUPS!")
+        
+        # Create enriched project data with all analysis info
         project_data = {
             'name': analysis.get('name', 'Unknown'),
-            'contract': analysis.get('token_address'),
+            'symbol': analysis.get('symbol', 'N/A'),
+            'contract': contract,
             'id': analysis.get('pair_address'),
             'dex': analysis.get('dex_name', 'Uniswap'),
             'launch_time': datetime.now(timezone.utc).strftime("%H:%M UTC"),
             'liquidity_usd': metrics.get('liquidity_usd', 0),
             'market_cap': metrics.get('market_cap', 0),
             'volume_24h': metrics.get('volume_24h', 0),
+            'volume_1h': metrics.get('volume_1h', 0),
         }
         
-        # Check if project meets rating threshold
-        should_post, rating = group_poster.should_post_project(project_data)
+        # Get all auto-detected groups
+        all_groups = db.get_all_groups()
         
-        if should_post:
-            logger.info(f"✨ Project {project_data['contract']} rated {rating.get('score')}/100 - posting to all groups!")
+        # Also check for manually configured GROUP_CHAT_ID
+        group_chat_id = os.getenv('GROUP_CHAT_ID')
+        if group_chat_id and group_chat_id.strip():
+            all_groups.append({'group_id': int(group_chat_id), 'group_name': 'manual', 'group_title': 'Manual Config'})
+        
+        if all_groups:
+            # Format message with full analysis data
+            message_text = group_poster.format_project_message(project_data, rating, analysis)
+            reply_markup = group_poster.get_buy_button(
+                project_data['contract'],
+                project_data['id']
+            )
             
-            # Get all auto-detected groups
-            all_groups = db.get_all_groups()
-            
-            # Also check for manually configured GROUP_CHAT_ID
-            group_chat_id = os.getenv('GROUP_CHAT_ID')
-            if group_chat_id and group_chat_id.strip():
-                all_groups.append({'group_id': int(group_chat_id), 'group_name': 'manual', 'group_title': 'Manual Config'})
-            
-            if all_groups:
-                message_text = group_poster.format_project_message(project_data, rating)
-                reply_markup = group_poster.get_buy_button(
-                    project_data['contract'],
-                    project_data['id']
-                )
-                
-                # Post to each group
-                for group in all_groups:
-                    try:
-                        await app.bot.send_message(
-                            chat_id=group['group_id'],
-                            text=message_text,
-                            reply_markup=reply_markup,
-                            parse_mode='HTML'
-                        )
-                        db.update_group_post_count(group['group_id'])
-                        logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']}")
-                    except Exception as e:
-                        logger.warning(f"Failed to post to group {group['group_id']}: {e}")
-            else:
-                logger.info(f"No groups configured. Add bot to a group for auto-posting!")
+            # Post to each group
+            for group in all_groups:
+                try:
+                    await app.bot.send_message(
+                        chat_id=group['group_id'],
+                        text=message_text,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                    db.update_group_post_count(group['group_id'])
+                    logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']} ({score}/100)")
+                except Exception as e:
+                    logger.warning(f"Failed to post to group {group['group_id']}: {e}")
+        else:
+            logger.info(f"No groups configured. Add bot to a group for auto-posting!")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
 
