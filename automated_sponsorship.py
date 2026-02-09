@@ -23,6 +23,17 @@ SPONSORSHIP_PACKAGES = {
     1299: {'name': 'featured_30d', 'duration': 30, 'type': 'featured'},
 }
 
+# ELIGIBILITY REQUIREMENTS - Prevent scam projects from buying promotions
+ELIGIBILITY_REQUIREMENTS = {
+    'min_security_score': 80,           # Must pass quality filter
+    'require_ownership_renounced': True, # No rug pull risk
+    'require_no_honeypot': True,        # Not a honeypot scam
+    'require_lp_locked': True,          # Liquidity locked = safe
+    'max_buy_tax': 10,                  # Reasonable buy tax
+    'max_sell_tax': 10,                 # Reasonable sell tax
+    'max_transfer_tax': 5,              # Reasonable transfer tax
+}
+
 class AutomatedSponsorshipProcessor:
     def __init__(self, db, sponsored_projects, payment_wallet: str):
         """
@@ -75,10 +86,18 @@ class AutomatedSponsorshipProcessor:
             
             from_wallet = payment_data.get('from_address', '').lower()
             amount = payment_data.get('amount_usd', 0)
+            token_address = payment_data.get('token_address', '')
             
             # Validate payment
             if not from_wallet or amount <= 0:
                 logger.warning(f"❌ Invalid payment data: {payment_data}")
+                return False
+            
+            # CHECK ELIGIBILITY FIRST - Critical to prevent scams
+            eligibility_result = self.check_project_eligibility(token_address)
+            if not eligibility_result['eligible']:
+                logger.warning(f"❌ Project REJECTED for sponsorship - {eligibility_result['reason']}")
+                self.processed_payments.add(tx_hash)  # Mark as processed to not retry
                 return False
             
             # Find matching package
@@ -99,7 +118,8 @@ class AutomatedSponsorshipProcessor:
                 amount=amount,
                 package_name=package_info['name'],
                 duration_days=package_info['duration'],
-                tx_hash=tx_hash
+                tx_hash=tx_hash,
+                token_address=token_address
             )
             
             if result:
@@ -113,9 +133,96 @@ class AutomatedSponsorshipProcessor:
             logger.error(f"❌ Error processing payment: {e}")
             return False
     
+    def check_project_eligibility(self, token_address: str) -> Dict:
+        """
+        Check if project meets sponsorship eligibility requirements
+        
+        Args:
+            token_address: Token contract address
+        
+        Returns:
+            Dict with 'eligible': bool and 'reason': str
+        """
+        try:
+            if not token_address:
+                return {
+                    'eligible': False,
+                    'reason': 'No token address provided'
+                }
+            
+            # Import security scanner
+            from security_scanner import SecurityScanner
+            from web3 import Web3
+            
+            w3 = Web3(Web3.HTTPProvider('https://mainnet.base.org'))
+            scanner = SecurityScanner(w3)
+            
+            # Get security rating
+            rating = scanner.get_project_rating(token_address)
+            
+            # Check each requirement
+            issues = []
+            
+            # 1. Security Score
+            score = rating.get('score', 0)
+            if score < ELIGIBILITY_REQUIREMENTS['min_security_score']:
+                issues.append(f"Security score {score}/100 < {ELIGIBILITY_REQUIREMENTS['min_security_score']}")
+            
+            # 2. Ownership Renounced
+            if ELIGIBILITY_REQUIREMENTS['require_ownership_renounced']:
+                if not rating.get('ownership_renounced', False):
+                    issues.append("Ownership not renounced (rug pull risk)")
+            
+            # 3. No Honeypot
+            if ELIGIBILITY_REQUIREMENTS['require_no_honeypot']:
+                if rating.get('is_honeypot', False):
+                    issues.append("Token is a honeypot scam")
+            
+            # 4. LP Locked
+            if ELIGIBILITY_REQUIREMENTS['require_lp_locked']:
+                if not rating.get('lp_locked', False):
+                    issues.append("Liquidity not locked")
+            
+            # 5. Reasonable Taxes
+            buy_tax = rating.get('buy_tax', 0)
+            sell_tax = rating.get('sell_tax', 0)
+            transfer_tax = rating.get('transfer_tax', 0)
+            
+            if buy_tax > ELIGIBILITY_REQUIREMENTS['max_buy_tax']:
+                issues.append(f"Buy tax {buy_tax}% exceeds max {ELIGIBILITY_REQUIREMENTS['max_buy_tax']}%")
+            
+            if sell_tax > ELIGIBILITY_REQUIREMENTS['max_sell_tax']:
+                issues.append(f"Sell tax {sell_tax}% exceeds max {ELIGIBILITY_REQUIREMENTS['max_sell_tax']}%")
+            
+            if transfer_tax > ELIGIBILITY_REQUIREMENTS['max_transfer_tax']:
+                issues.append(f"Transfer tax {transfer_tax}% exceeds max {ELIGIBILITY_REQUIREMENTS['max_transfer_tax']}%")
+            
+            # Return result
+            if not issues:
+                logger.info(f"✅ PROJECT ELIGIBLE: {token_address}")
+                logger.info(f"   Security Score: {score}/100")
+                logger.info(f"   Ownership: Renounced ✓")
+                logger.info(f"   Honeypot: Clear ✓")
+                logger.info(f"   LP: Locked ✓")
+                logger.info(f"   Taxes: {buy_tax}% buy / {sell_tax}% sell ✓")
+                return {'eligible': True, 'reason': 'All requirements met'}
+            else:
+                reason = ' | '.join(issues)
+                logger.warning(f"❌ PROJECT INELIGIBLE: {token_address}")
+                for issue in issues:
+                    logger.warning(f"   ✗ {issue}")
+                return {'eligible': False, 'reason': reason}
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking eligibility: {e}")
+            return {
+                'eligible': False,
+                'reason': f'Eligibility check failed: {str(e)}'
+            }
+    
     def activate_sponsorship(self, wallet_address: str, amount: float,
                             package_name: str, duration_days: int,
-                            tx_hash: str) -> bool:
+                            tx_hash: str, token_address: str = None) -> bool:
         """
         Activate sponsorship for a project
         
@@ -125,6 +232,7 @@ class AutomatedSponsorshipProcessor:
             package_name: Sponsorship package name
             duration_days: How many days sponsorship lasts
             tx_hash: Transaction hash for tracking
+            token_address: Token contract address for attribution
         
         Returns:
             bool: True if activated successfully
@@ -142,6 +250,8 @@ class AutomatedSponsorshipProcessor:
             logger.info(f"   ⏱️  Duration: {duration_days} days")
             logger.info(f"   🪙 From: {wallet_address}")
             logger.info(f"   🔗 TX: {tx_hash}")
+            if token_address:
+                logger.info(f"   📍 Token: {token_address}")
             
             # TODO: Link token address to wallet for automatic activation
             # For now, store payment metadata for admin to link
@@ -150,7 +260,8 @@ class AutomatedSponsorshipProcessor:
                 amount=amount,
                 package_name=package_name,
                 duration_days=duration_days,
-                tx_hash=tx_hash
+                tx_hash=tx_hash,
+                token_address=token_address
             )
             
             return True
@@ -161,7 +272,7 @@ class AutomatedSponsorshipProcessor:
     
     def _store_pending_sponsorship(self, wallet_address: str, amount: float,
                                    package_name: str, duration_days: int,
-                                   tx_hash: str):
+                                   tx_hash: str, token_address: str = None):
         """Store pending sponsorship in database for admin verification"""
         try:
             # This would require adding a pending_sponsorships table
@@ -169,6 +280,8 @@ class AutomatedSponsorshipProcessor:
             logger.info(f"   Wallet: {wallet_address}")
             logger.info(f"   Package: {package_name}")
             logger.info(f"   TX: {tx_hash}")
+            if token_address:
+                logger.info(f"   Token: {token_address}")
         except Exception as e:
             logger.error(f"Failed to store pending sponsorship: {e}")
     
