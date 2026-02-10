@@ -11,13 +11,14 @@ import time
 from datetime import datetime, timezone
 from web3 import Web3
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeAllGroupChats
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from database import UserDatabase
 from trading import TradingBot
 from security_scanner import SecurityScanner
 from admin import AdminManager
 from payment_monitor import PaymentMonitor
+import html
 
 # Setup logging early for import errors
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -59,6 +60,9 @@ BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
 # Use public Base RPC by default (no rate limits), fall back to Alchemy if BASE_RPC_URL is explicitly set to Alchemy
 BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
+
+# Payment wallet for sponsorship/payment monitoring (optional)
+payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS') or None
 
 # Base chain addresses
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
@@ -764,11 +768,11 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
     try:
         # Get security rating first
         contract = analysis.get('token_address')
-        rating = security_scanner.get_project_rating(contract) if security_scanner else {}
+        rating = security_scanner.scan_token(contract) if security_scanner else {}
         score = rating.get('score', 0)
         
-        # STRICT QUALITY FILTER: Only post projects with 80+ security score
-        MIN_QUALITY_SCORE = 80
+        # STRICT QUALITY FILTER: Only post projects with 70+ security score
+        MIN_QUALITY_SCORE = 70
         if score < MIN_QUALITY_SCORE:
             logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping group post.")
             return
@@ -828,10 +832,10 @@ async def send_launch_alert(app: Application, analysis: dict):
 
     # STRICT QUALITY FILTER: Check security score FIRST
     contract = analysis.get('token_address')
-    rating = security_scanner.get_project_rating(contract) if security_scanner else {}
+    rating = security_scanner.scan_token(contract) if security_scanner else {}
     score = rating.get('score', 0)
     
-    MIN_QUALITY_SCORE = 80
+    MIN_QUALITY_SCORE = 70
     if score < MIN_QUALITY_SCORE:
         logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping alert.")
         return  # Don't send alert for low-quality tokens
@@ -1084,7 +1088,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
+    # If called from a group, redirect user to DM
+    if is_group_chat(update):
+        bot_me = await context.bot.get_me()
+        bot_username = bot_me.username
+        group_msg = (
+            f"👋 Hey {user.first_name}!\n\n"
+            f"🚀 *Base Fair Launch Sniper Bot* is active in this group!\n\n"
+            f"I'll post top-rated new token launches here automatically.\n\n"
+            f"👉 *Tap below to open your personal bot menu:*"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Open Bot in DM", url=f"https://t.me/{bot_username}?start=group")]
+        ])
+        await update.message.reply_text(
+            group_msg,
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+        return
+
     referrer_code = args[0] if args else None
+    # Ignore the 'group' arg from DM redirect
+    if referrer_code == 'group':
+        referrer_code = None
 
     result = db.add_user(
         user_id=user.id,
@@ -1213,17 +1240,25 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except Exception as e:
             logger.warning(f"Could not delete message in group: {e}")
-            # If we can't delete, warn user to use DM
+        
+        # Always process buy via DM for privacy
+        try:
+            # Send confirmation to DM instead of group
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "🔒 *Processing your /buy command privately*\n\n"
+                    "Your trade details are kept private.\n"
+                    "Processing now..."
+                ),
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            # User hasn't started the bot in DM yet
+            bot_me = await context.bot.get_me()
             try:
-                await context.bot.send_message(
-                    chat_id=user.id,
-                    text=(
-                        "⚠️ *Privacy Warning*\n\n"
-                        "I couldn't delete your /buy command in the group.\n"
-                        "For privacy, please use /buy in a private message with me.\n\n"
-                        "This keeps your wallet address hidden from others."
-                    ),
-                    parse_mode='Markdown'
+                await update.effective_chat.send_message(
+                    f"@{user.username or user.first_name} Please start the bot first: @{bot_me.username}"
                 )
             except:
                 pass
@@ -1892,17 +1927,19 @@ async def create_wallet_callback(update: Update, context: ContextTypes.DEFAULT_T
 
             await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
         else:
+            safe_msg = html.escape(str(result.get('message', '')))
             await query.edit_message_text(
-                f"❌ *Error creating wallet*\n\n{result['message']}\n\nTry again later.",
-                parse_mode='Markdown',
+                f"❌ <b>Error creating wallet</b>\n\n<pre>{safe_msg}</pre>\n\nTry again later.",
+                parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="wallets")]])
             )
 
     except Exception as e:
         logger.error(f"Wallet creation error: {e}")
+        safe_err = html.escape(str(e))
         await query.edit_message_text(
-            f"❌ *Error creating wallet*\n\n`{str(e)}`\n\nTry again later.",
-            parse_mode='Markdown',
+            f"❌ <b>Error creating wallet</b>\n\n<pre>{safe_err}</pre>\n\nTry again later.",
+            parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="wallets")]])
         )
 
@@ -2556,6 +2593,30 @@ async def handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, eth_amo
 
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
+async def register_commands_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to re-register bot commands for all chats at runtime"""
+    user = update.effective_user
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+
+    try:
+        commands = [
+            BotCommand("start", "Show main menu"),
+            BotCommand("menu", "Open menu"),
+            BotCommand("buy", "Buy token"),
+            BotCommand("checktoken", "Check a token"),
+            BotCommand("admin", "Admin panel")
+        ]
+        # Register for all scopes
+        await context.bot.set_my_commands(commands)  # Default (everywhere)
+        await context.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())  # Groups
+        await update.message.reply_text("✅ Bot commands re-registered for all chats.")
+        logger.info("✅ Admin re-registered bot commands for all chats")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not re-register bot commands: {e}")
+        await update.message.reply_text(f"⚠️ Failed to register commands: {e}")
+
 async def handle_sell(update: Update, context: ContextTypes.DEFAULT_TYPE, percentage: float, token_address: str):
     """Handle sell transaction"""
     query = update.callback_query
@@ -2986,7 +3047,7 @@ async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TY
             welcome_msg = (
                 f"👋 Hello! I'm the Base Fair Launch Sniper Bot\n\n"
                 f"✨ I will automatically post good-rated projects here!\n\n"
-                f"🛡️ Only projects with 75+ security rating will be posted\n"
+                f"🛡️ Only projects with 70+ security rating will be posted\n"
                 f"💳 Click 'Buy Now' to execute instant trades\n\n"
                 f"📊 Group auto-enabled for posting!\n"
                 f"Waiting for new fair launches..."
@@ -3042,6 +3103,22 @@ async def main():
     # Create application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Ensure slash commands appear in groups: set bot commands for all group chats
+    try:
+        commands = [
+            BotCommand("start", "Show main menu"),
+            BotCommand("menu", "Open menu"),
+            BotCommand("buy", "Buy token"),
+            BotCommand("checktoken", "Check a token"),
+            BotCommand("admin", "Admin panel")
+        ]
+        # Register for all scopes: default, private, and groups
+        await app.bot.set_my_commands(commands)  # Default scope (everywhere)
+        await app.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())  # Groups
+        logger.info("✅ Bot commands registered globally for all chats")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not register bot commands: {e}")
+
     # Initialize sponsored projects tracking (if available)
     sponsored_projects = None
     if SPONSORSHIP_AVAILABLE:
@@ -3065,6 +3142,7 @@ async def main():
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("register_commands", register_commands_admin))
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("earnings", earnings_command))
     app.add_handler(CommandHandler("admin", admin_panel))
@@ -3086,18 +3164,16 @@ async def main():
             pattern='^buy_'
         ))
     
-    # Add handlers for automatic group detection (only if available)
-    if GROUP_POSTER_AVAILABLE:
-        app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
-        app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
+    # Add handlers for automatic group detection (always enabled)
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
 
     logger.info(f"✅ Bot username: @{BOT_USERNAME}")
     logger.info("✅ Database initialized")
     logger.info("✅ Automatic group detection ENABLED")
     logger.info("✅ Group posting will auto-enable when bot is added to groups")
 
-    # Check payment wallet configuration
-    payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS')
+    # Check payment wallet configuration (use global payment_wallet)
     if payment_wallet:
         logger.info(f"💰 Payment wallet: {payment_wallet}")
     else:
