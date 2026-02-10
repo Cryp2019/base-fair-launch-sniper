@@ -47,6 +47,7 @@ class PaymentMonitor:
             abi=ERC20_ABI
         )
         self.processed_txs = set()  # Track processed transactions
+        self.on_payment_received = None  # Callback for sponsorship processor
         
     async def start_monitoring(self):
         """Start monitoring for USDC payments"""
@@ -105,7 +106,24 @@ class PaymentMonitor:
             
             logger.info(f"💰 Payment detected: {amount_usdc} USDC from {from_address}")
             
-            # Check if payment is >= 4 USDC
+            # Forward ALL payments to sponsorship processor if callback is set
+            if self.on_payment_received:
+                payment_data = {
+                    'tx_hash': tx_hash,
+                    'from_address': from_address,
+                    'to_address': self.payment_wallet,
+                    'amount_usd': amount_usdc,
+                    'token_address': '',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'project_wallet': from_address
+                }
+                try:
+                    await self.on_payment_received(payment_data)
+                    logger.info(f"📢 Forwarded payment to sponsorship processor: ${amount_usdc}")
+                except Exception as e:
+                    logger.error(f"Sponsorship processor error: {e}")
+            
+            # Premium upgrade for payments >= 4 USDC
             if amount_usdc >= 4.0:
                 # Try to find user by wallet address
                 user_id = self.db.get_user_by_wallet(from_address)
@@ -139,11 +157,11 @@ class PaymentMonitor:
                         logger.error(f"Failed to notify user {user_id}: {e}")
                 else:
                     logger.warning(f"⚠️ Payment from unknown wallet: {from_address}")
-                    # Could store this for manual processing
             
             # Mark as processed
             self.processed_txs.add(tx_hash)
             
         except Exception as e:
             logger.error(f"Error processing payment: {e}")
+
 

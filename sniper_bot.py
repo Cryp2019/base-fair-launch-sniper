@@ -1491,6 +1491,34 @@ async def earnings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 
+async def advertise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show sponsorship/advertising packages"""
+    if SPONSORSHIP_AVAILABLE:
+        from sponsorship_processor import format_payment_instructions
+        wallet = payment_wallet or 'Not configured'
+        msg = format_payment_instructions(wallet)
+    else:
+        msg = (
+            "📢 *PROMOTE YOUR PROJECT*\n\n"
+            "Advertising packages coming soon!\n\n"
+            "Contact @support for early access."
+        )
+    
+    keyboard = [[InlineKeyboardButton("« Back", callback_data="menu")]]
+    
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            msg, parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            msg, parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
 async def howitworks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Explain how it works"""
     query = update.callback_query
@@ -2933,7 +2961,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'snipe': snipe_callback,
         'wallets': wallets_callback,
         'create_wallet': create_wallet_callback,
-        'export_key': export_key_callback
+        'export_key': export_key_callback,
+        'advertise': advertise_command
     }
 
     handler = handlers.get(query.data)
@@ -3146,6 +3175,7 @@ async def main():
     app.add_handler(CommandHandler("register_commands", register_commands_admin))
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("earnings", earnings_command))
+    app.add_handler(CommandHandler("advertise", advertise_command))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
