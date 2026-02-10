@@ -772,7 +772,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         score = rating.get('score', 0)
         
         # Quality filter for group posts (lower threshold since LP lock detection is limited)
-        MIN_QUALITY_SCORE = 30
+        MIN_QUALITY_SCORE = 50
         if score < MIN_QUALITY_SCORE:
             logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping group post.")
             return
