@@ -771,8 +771,8 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         rating = security_scanner.scan_token(contract) if security_scanner else {}
         score = rating.get('score', 0)
         
-        # STRICT QUALITY FILTER: Only post projects with 70+ security score
-        MIN_QUALITY_SCORE = 70
+        # Quality filter for group posts (lower threshold since LP lock detection is limited)
+        MIN_QUALITY_SCORE = 30
         if score < MIN_QUALITY_SCORE:
             logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping group post.")
             return
@@ -828,19 +828,20 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         logger.error(f"Error in group posting: {e}")
 
 async def send_launch_alert(app: Application, analysis: dict):
-    """Send beautiful alert for new token launch - QUALITY FILTERED (80+ score only)"""
+    """Send alert for new token launch - includes safety score for user reference"""
 
-    # STRICT QUALITY FILTER: Check security score FIRST
+    # Get security score for display (NOT for filtering)
     contract = analysis.get('token_address')
-    rating = security_scanner.scan_token(contract) if security_scanner else {}
-    score = rating.get('score', 0)
+    try:
+        rating = security_scanner.scan_token(contract) if security_scanner else {}
+    except Exception as e:
+        logger.warning(f"Security scan error for {contract}: {e}")
+        rating = {}
+    score = rating.get('score', 50)  # Default to 50 if scan fails
+    analysis['security_score'] = score
+    analysis['security_rating'] = rating
     
-    MIN_QUALITY_SCORE = 70
-    if score < MIN_QUALITY_SCORE:
-        logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping alert.")
-        return  # Don't send alert for low-quality tokens
-    
-    logger.info(f"✨ HIGH QUALITY PROJECT: {analysis.get('name')} rated {score}/100 - SENDING ALERTS!")
+    logger.info(f"📢 Sending alert for {analysis.get('name')} (safety score: {score}/100)")
 
     # Get all users with alerts enabled
     users = db.get_users_with_alerts()
