@@ -207,6 +207,18 @@ class TradingBot:
                             commission_tx_hash = commission_tx_hash_result.hex()
                             logger.info(f"💰 Referrer commission sent: {referrer_commission} ETH - TX: {commission_tx_hash}")
                             current_nonce += 1 # Increment nonce for next transaction
+                            
+                            # Record commission in database for /earnings tracking
+                            try:
+                                db.log_commission(
+                                    referrer_id=referrer_id,
+                                    referred_user_id=user_id,
+                                    trade_tx_hash=commission_tx_hash,
+                                    commission_amount=referrer_commission,
+                                    commission_tx_hash=commission_tx_hash
+                                )
+                            except Exception as log_err:
+                                logger.warning(f"Failed to log commission in DB: {log_err}")
                     except Exception as e:
                         logger.error(f"Referrer commission failed: {e}")
                 else:

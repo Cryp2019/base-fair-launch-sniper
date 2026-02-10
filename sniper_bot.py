@@ -1625,6 +1625,7 @@ async def refer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"│  🎁 *REWARDS*        │\n"
         f"└─────────────────────┘\n\n"
         f"▸ 10 referrals = 1 month FREE premium\n"
+        f"▸ 💰 Earn 5% of trading fees for 30 days\n"
         f"▸ Premium features unlocked\n"
         f"▸ Priority alerts & analytics\n\n"
         f"💡 *Share your link to earn!*"
