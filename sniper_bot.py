@@ -774,12 +774,8 @@ async def _auto_delete_message(app: Application, chat_id: int, message_id: int, 
         logger.debug(f"Could not auto-delete message {message_id}: {e}")
 
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
-    """Post ALL projects to groups with Buy Now button + cooldown + auto-delete"""
+    """Post ALL projects to groups - formats messages directly (no external dependencies)"""
     global _group_post_count, _group_post_cooldown_until
-    
-    if not GROUP_POSTER_AVAILABLE or not group_poster:
-        logger.debug("Group poster not available, skipping group post")
-        return
     
     try:
         # Check cooldown: after 3 posts, pause for 5 minutes
@@ -789,29 +785,66 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             logger.info(f"⏳ Group post cooldown active ({remaining}s remaining). Skipping: {analysis.get('name')}")
             return
         
-        # Get security rating for display (NOT for filtering)
-        contract = analysis.get('token_address')
-        try:
-            rating = security_scanner.scan_token(contract) if security_scanner else {}
-        except Exception:
-            rating = {'score': 50, 'warnings': [], 'risk_level': 'UNKNOWN'}
-        score = rating.get('score', 50)
+        # Get security score for display
+        contract = analysis.get('token_address', '')
+        score = analysis.get('security_score', 50)
         
-        logger.info(f"📢 Posting to groups: {analysis.get('name')} (score: {score}/100)")
+        # Format numbers
+        def fmt(num):
+            if num >= 1_000_000: return f"${num/1_000_000:.1f}M"
+            elif num >= 1_000: return f"${num/1_000:.1f}K"
+            elif num > 0: return f"${num:.2f}"
+            return "N/A"
         
-        # Create enriched project data with all analysis info
-        project_data = {
-            'name': analysis.get('name', 'Unknown'),
-            'symbol': analysis.get('symbol', 'N/A'),
-            'contract': contract,
-            'id': analysis.get('pair_address'),
-            'dex': analysis.get('dex_name', 'Uniswap'),
-            'launch_time': datetime.now(timezone.utc).strftime("%H:%M UTC"),
-            'liquidity_usd': metrics.get('liquidity_usd', 0),
-            'market_cap': metrics.get('market_cap', 0),
-            'volume_24h': metrics.get('volume_24h', 0),
-            'volume_1h': metrics.get('volume_1h', 0),
-        }
+        name = analysis.get('name', 'Unknown')
+        symbol = analysis.get('symbol', 'N/A').upper()
+        dex_name = analysis.get('dex_name', 'Unknown')
+        dex_emoji = analysis.get('dex_emoji', '🔷')
+        mc = fmt(metrics.get('market_cap', 0))
+        liq = fmt(metrics.get('liquidity_usd', 0))
+        vol = fmt(metrics.get('volume_24h', 0))
+        
+        # Score emoji
+        if score >= 75: score_line = f"🟢 {score}/100"
+        elif score >= 50: score_line = f"🟡 {score}/100"
+        else: score_line = f"🔴 {score}/100"
+        
+        # Safety details
+        renounced = analysis.get('renounced', False)
+        honeypot = analysis.get('is_honeypot', False)
+        own_status = '✅ Renounced' if renounced else '⚠️ Active'
+        hp_status = '✅ Safe' if not honeypot else '🚨 DANGER'
+        
+        launch_time = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        
+        # Build message (HTML format for groups)
+        message_text = (
+            f"🚀 <b>NEW TOKEN LAUNCH</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>{name}</b> (${symbol})\n"
+            f"{dex_emoji} {dex_name} • {launch_time}\n\n"
+            f"💰 MC: <b>{mc}</b>\n"
+            f"💧 Liq: <b>{liq}</b>\n"
+            f"📊 Vol 24h: <b>{vol}</b>\n\n"
+            f"🛡 Safety: {score_line}\n"
+            f"👤 Owner: {own_status}\n"
+            f"🍯 Honeypot: {hp_status}\n\n"
+            f"📋 <code>{contract}</code>\n\n"
+            f"⚠️ <i>DYOR! Not financial advice.</i>"
+        )
+        
+        # Action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/base/{contract}"),
+                InlineKeyboardButton("🔍 Scan", url=f"https://basescan.org/token/{contract}"),
+            ],
+            [
+                InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{contract}"),
+                InlineKeyboardButton("🎯 Snipe", callback_data=f"snipe_{contract}"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Get all auto-detected groups
         all_groups = db.get_all_groups()
@@ -819,44 +852,46 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         # Also check for manually configured GROUP_CHAT_ID
         group_chat_id = os.getenv('GROUP_CHAT_ID')
         if group_chat_id and group_chat_id.strip():
-            all_groups.append({'group_id': int(group_chat_id), 'group_name': 'manual', 'group_title': 'Manual Config'})
+            # Avoid duplicates
+            manual_id = int(group_chat_id)
+            if not any(g['group_id'] == manual_id for g in all_groups):
+                all_groups.append({'group_id': manual_id, 'group_name': 'manual', 'group_title': 'Manual Config'})
         
-        if all_groups:
-            # Format message with full analysis data
-            message_text = group_poster.format_project_message(project_data, rating, analysis)
-            reply_markup = group_poster.get_buy_button(
-                project_data['contract'],
-                project_data['id']
-            )
-            
-            # Post to each group
-            for group in all_groups:
-                try:
-                    sent_msg = await app.bot.send_message(
-                        chat_id=group['group_id'],
-                        text=message_text,
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
-                    db.update_group_post_count(group['group_id'])
-                    logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']} (score: {score}/100)")
-                    
-                    # Schedule auto-delete after 5 minutes
-                    asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to post to group {group['group_id']}: {e}")
-            
-            # Increment post counter and check cooldown
-            _group_post_count += 1
-            if _group_post_count >= 3:
-                _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
-                _group_post_count = 0
-                logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
-        else:
+        if not all_groups:
             logger.info(f"No groups configured. Add bot to a group for auto-posting!")
+            return
+        
+        logger.info(f"📢 Posting {name} (${symbol}) to {len(all_groups)} group(s) (score: {score}/100)")
+        
+        # Post to each group
+        for group in all_groups:
+            try:
+                sent_msg = await app.bot.send_message(
+                    chat_id=group['group_id'],
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                db.update_group_post_count(group['group_id'])
+                logger.info(f"📢 Posted to group {group['group_id']}: {name} (score: {score}/100)")
+                
+                # Schedule auto-delete after 5 minutes
+                asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                
+            except Exception as e:
+                logger.warning(f"Failed to post to group {group['group_id']}: {e}")
+        
+        # Increment post counter and check cooldown
+        _group_post_count += 1
+        if _group_post_count >= 3:
+            _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
+            _group_post_count = 0
+            logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def send_launch_alert(app: Application, analysis: dict):
@@ -1123,12 +1158,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # If called from a group, redirect user to DM
     if is_group_chat(update):
+        # Auto-register this group for posting
+        chat = update.effective_chat
+        if chat:
+            db.add_group(chat.id, chat.username or 'private_group', chat.title or 'Group')
+            logger.info(f"📝 Group registered via /start: {chat.title} (ID: {chat.id})")
+        
         bot_me = await context.bot.get_me()
         bot_username = bot_me.username
         group_msg = (
             f"👋 Hey {user.first_name}!\n\n"
             f"🚀 *Base Fair Launch Sniper Bot* is active in this group!\n\n"
-            f"I'll post top-rated new token launches here automatically.\n\n"
+            f"I'll post ALL new token launches here automatically.\n"
+            f"📊 Group ID: `{chat.id}` ✅ Registered!\n\n"
             f"👉 *Tap below to open your personal bot menu:*"
         )
         keyboard = InlineKeyboardMarkup([
