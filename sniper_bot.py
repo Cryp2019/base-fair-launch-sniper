@@ -2328,12 +2328,13 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # Send "analyzing" message
-    analyzing_msg = await update.message.reply_text("🔍 Analyzing token... Please wait...")
+    analyzing_msg = await update.message.reply_text("🔍 Scanning token... Please wait...")
 
     try:
         # Check if user is premium
         user_data = db.get_user(user.id)
         is_premium = user_data and user_data['tier'] == 'premium'
+        premium_badge = " 💎" if is_premium else ""
 
         # Get token contract
         token_address = w3.to_checksum_address(text)
@@ -2367,151 +2368,241 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             renounced = owner.lower() in [a.lower() for a in burn_addresses]
         except:
             renounced = True  # No owner function = likely renounced
+
         # Format supply
         supply_formatted = total_supply / (10 ** decimals)
 
-        # ===== FETCH COMPREHENSIVE METRICS =====
-        metrics = {
-            'price_usd': 0,
-            'market_cap': 0,
-            'liquidity_usd': 0,
-            'volume_24h': 0,
-            'ath': None,
-            'has_limits': False,
-            'limit_details': 'No limits',
-            'clog_percentage': 0.03,
-            'airdrops': []
-        }
-        
-        # Try to fetch comprehensive metrics
+        # ===== FETCH DEXSCREENER DATA INLINE =====
+        price_usd = 0
+        market_cap = 0
+        liquidity_usd = 0
+        volume_24h = 0
+        volume_1h = 0
+        price_change_24h = 0
+        price_change_1h = 0
+        ath_value = None
+        pair_age = ""
+        holders_count = 0
+        dex_paid = False
+        pair_url = ""
+
         try:
-            # Get DexScreener data
-            dex_data = await get_dexscreener_data(token_address)
-            metrics.update(dex_data)
-            
-            # Get transfer limits
-            limits = await check_transfer_limits(token_address)
-            metrics['has_limits'] = limits['has_limits']
-            metrics['limit_details'] = limits['details']
-            
-            # Get clog percentage
-            metrics['clog_percentage'] = await calculate_clog_percentage(token_address, token_address)
-            
-            # Detect airdrops (premium only)
-            if is_premium:
-                metrics['airdrops'] = await detect_airdrops(token_address)
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_address}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        pairs = data.get('pairs', [])
+                        if pairs:
+                            pair = pairs[0]  # Best pair
+                            price_usd = float(pair.get('priceUsd', 0) or 0)
+                            market_cap = float(pair.get('marketCap', 0) or pair.get('fdv', 0) or 0)
+                            liquidity_usd = float(pair.get('liquidity', {}).get('usd', 0) or 0)
+                            volume_24h = float(pair.get('volume', {}).get('h24', 0) or 0)
+                            volume_1h = float(pair.get('volume', {}).get('h1', 0) or 0)
+                            price_change_24h = float(pair.get('priceChange', {}).get('h24', 0) or 0)
+                            price_change_1h = float(pair.get('priceChange', {}).get('h1', 0) or 0)
+                            pair_url = pair.get('url', '')
+                            
+                            # Get ATH from price history
+                            ath_value = float(pair.get('ath', 0)) if pair.get('ath') else None
+                            
+                            # Calculate pair age
+                            pair_created = pair.get('pairCreatedAt', 0)
+                            if pair_created:
+                                from datetime import datetime, timezone
+                                created_time = datetime.fromtimestamp(pair_created / 1000, tz=timezone.utc)
+                                now = datetime.now(timezone.utc)
+                                diff = now - created_time
+                                days = diff.days
+                                if days > 0:
+                                    pair_age = f"{days}d"
+                                elif diff.total_seconds() > 3600:
+                                    pair_age = f"{int(diff.total_seconds() / 3600)}h"
+                                else:
+                                    pair_age = f"{int(diff.total_seconds() / 60)}m"
+                            
+                            # Check if dex paid
+                            dex_paid = bool(pair.get('paidPromo'))
         except Exception as e:
-            logger.debug(f"Could not fetch all metrics: {e}")
+            logger.debug(f"DexScreener fetch error: {e}")
 
         # ===== SECURITY SCAN =====
         is_honeypot = False
-        buy_tax = 0
-        sell_tax = 0
-        transfer_tax = 0
+        buy_tax = 0.0
+        sell_tax = 0.0
         liquidity_locked = False
         lock_days = 0
         locker_name = "Unknown"
-        
+
         try:
             from security_scanner import SecurityScanner
             scanner = SecurityScanner(w3)
-            
-            # Check honeypot
+
             honeypot_result = scanner.check_honeypot(token_address)
             is_honeypot = honeypot_result.get('is_honeypot', False)
-            buy_tax = honeypot_result.get('buy_tax', 0)
-            sell_tax = honeypot_result.get('sell_tax', 0)
-            
-            # Check liquidity lock
+            buy_tax = float(honeypot_result.get('buy_tax', 0))
+            sell_tax = float(honeypot_result.get('sell_tax', 0))
+
             lock_result = scanner.check_liquidity_lock(token_address)
             liquidity_locked = lock_result.get('is_locked', False)
             lock_days = lock_result.get('lock_days', 0)
             locker_name = lock_result.get('locker_name', 'Unknown')
         except Exception as e:
-            logger.debug(f"Security scan failed: {e}")
+            logger.debug(f"Security scan error: {e}")
 
-        total_tax = buy_tax + sell_tax + transfer_tax
-
-        # Format numbers
-        def format_number(num):
+        # ===== FORMAT DISPLAY VALUES =====
+        def fmt(num):
             if num >= 1_000_000:
-                return f"${num/1_000_000:.2f}M"
+                return f"${num/1_000_000:.1f}M"
             elif num >= 1_000:
-                return f"${num/1_000:.2f}K"
-            else:
+                return f"${num/1_000:.1f}K"
+            elif num > 0:
                 return f"${num:.2f}"
+            return "N/A"
 
-        mc_str = format_number(metrics['market_cap']) if metrics['market_cap'] > 0 else "N/A"
-        ath_str = format_number(metrics['ath']) if metrics.get('ath') and is_premium else ("Premium Only" if not is_premium else "N/A")
-        liq_str = format_number(metrics['liquidity_usd']) if metrics['liquidity_usd'] > 0 else "N/A"
-        price_str = f"${metrics['price_usd']:.8f}" if metrics['price_usd'] > 0 else "N/A"
-        vol_str = format_number(metrics['volume_24h']) if metrics['volume_24h'] > 0 else "N/A"
-        airdrop_str = ", ".join(metrics['airdrops']) if is_premium and metrics['airdrops'] else ("None detected" if is_premium else "Premium Only")
-
-        # Build response message with comprehensive security scan
-        status_emoji = "✅" if renounced else "⚠️"
-
-        msg = (
-            f"╔═══════════════════════╗\n"
-            f"   🔍 *TOKEN ANALYSIS*\n"
-            f"╚═══════════════════════╝\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💎 *TOKEN INFO*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Name: *{name}*\n"
-            f"Symbol: *${symbol.upper()}*\n"
-            f"Decimals: *{decimals}*\n"
-            f"Total Supply: *{supply_formatted:,.0f}*\n\n"
-            f"🧢 MC: {mc_str}     | ATH: {ath_str}\n"
-            f"💧 Liq: {liq_str}\n"
-            f"🏷 Price: {price_str}\n"
-            f"🎚 Vol: {vol_str}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ *SAFETY CHECKS*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{status_emoji} Ownership: *{'Renounced ✅' if renounced else 'NOT Renounced ⚠️'}*\n"
-            f"{'✅' if not is_honeypot else '🚨'} Honeypot: *{'SAFE' if not is_honeypot else 'DETECTED ⚠️'}*\n"
-            f"{'✅' if liquidity_locked else '❌'} LP Locked: *{'YES' if liquidity_locked else 'NO'}*"
-        )
-
-        if liquidity_locked:
-            msg += f"\n   └ {lock_days} days via {locker_name}"
-
-        msg += (
-            f"\n\n🏧 B: {buy_tax:.2f}% | S: {sell_tax:.2f}% | T: {total_tax:.2f}%\n"
-            f"⚖️ {metrics['limit_details']}\n"
-            f"🪠 Clog: {metrics['clog_percentage']:.2f}%\n\n"
-        )
-
-        if is_premium:
-            msg += f"🪂 Airdrops: {airdrop_str}\n\n"
+        mc_str = fmt(market_cap)
+        liq_str = fmt(liquidity_usd)
+        vol_24h_str = fmt(volume_24h)
+        vol_1h_str = fmt(volume_1h)
+        price_str = f"${price_usd:.10f}" if price_usd > 0 and price_usd < 0.001 else (f"${price_usd:.6f}" if price_usd > 0 and price_usd < 1 else (f"${price_usd:.2f}" if price_usd > 0 else "N/A"))
+        
+        # ATH display  
+        if ath_value and ath_value > 0:
+            ath_str = fmt(ath_value)
+        elif market_cap > 0:
+            ath_str = "🔝" + mc_str  # Current MC as proxy
         else:
-            msg += f"💡 *Upgrade to Premium* for ATH tracking & airdrop detection!\n\n"
+            ath_str = "N/A"
 
-        msg += (
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *CONTRACT*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"`{token_address}`\n\n"
-            f"⚠️ *DYOR! Not financial advice.*\n"
-            f"Always verify before investing!"
-        )
+        # Price change arrows
+        change_24h_emoji = "📈" if price_change_24h > 0 else "📉" if price_change_24h < 0 else "➖"
+        change_1h_emoji = "🟢" if price_change_1h > 0 else "🔴" if price_change_1h < 0 else "⚪"
+        change_24h_str = f"{'+' if price_change_24h > 0 else ''}{price_change_24h:.1f}%"
+        change_1h_str = f"{'+' if price_change_1h > 0 else ''}{price_change_1h:.1f}%"
 
-        # Create action buttons
+        # Safety emojis
+        own_emoji = "✅" if renounced else "⚠️"
+        hp_emoji = "🤍" if not is_honeypot else "🔴"
+        lp_emoji = "✅" if liquidity_locked else "❌"
+        
+        # Tax assessment
+        total_tax = buy_tax + sell_tax
+        if total_tax <= 5:
+            tax_emoji = "🟢"
+        elif total_tax <= 15:
+            tax_emoji = "🟡"
+        else:
+            tax_emoji = "🔴"
+
+        # Calculate security score
+        sec_score = 0
+        if renounced: sec_score += 30
+        if not is_honeypot: sec_score += 30
+        if liquidity_locked: sec_score += 25
+        if total_tax < 5: sec_score += 15
+        sec_score = min(sec_score, 100)
+        
+        # Score bar
+        def score_bar(score):
+            filled = int(score / 10)
+            empty = 10 - filled
+            if score >= 75:
+                return f"{'🟩' * filled}{'⬜' * empty} {score}/100"
+            elif score >= 50:
+                return f"{'🟨' * filled}{'⬜' * empty} {score}/100"
+            else:
+                return f"{'🟥' * filled}{'⬜' * empty} {score}/100"
+
+        # ===== BUILD SLEEK MESSAGE =====
+        msg = f"🔬 *{name}* • ${symbol.upper()}{premium_badge}\n"
+        msg += f"{'━' * 28}\n\n"
+
+        # Ownership & Honeypot status line (Soul Scanner style)
+        msg += f"{own_emoji} Owner: {'Renounced' if renounced else 'Active'} | "
+        msg += f"{hp_emoji} Honeypot: {'Safe' if not is_honeypot else 'DANGER'}\n\n"
+
+        # Age & Market Data
+        if pair_age:
+            msg += f"🕐 Age: *{pair_age}*"
+            if price_change_24h != 0:
+                msg += f" \\[{change_24h_str}]"
+            msg += "\n"
+        
+        msg += f"💰 MC:   *{mc_str}* • 🔝 {ath_str}\n"
+        msg += f"💧 Liq:    *{liq_str}*"
+        if liquidity_usd > 0:
+            try:
+                eth_price = 2500  # Approximate
+                liq_eth = liquidity_usd / eth_price
+                msg += f" \\[{liq_eth:.1f} ETH]"
+            except:
+                pass
+        msg += "\n"
+        msg += f"📊 Vol:    *{vol_1h_str}* \\[1h] • {vol_24h_str} \\[24h]\n"
+        msg += f"🏷 Price: *{price_str}*\n"
+        if price_change_1h != 0 or price_change_24h != 0:
+            msg += f"┗   {change_1h_emoji} 1h: {change_1h_str} | {change_24h_emoji} 24h: {change_24h_str}\n"
+        msg += "\n"
+
+        # Safety Checks Section
+        msg += f"{'━' * 28}\n"
+        msg += f"🛡 *SAFETY*\n"
+        msg += f"{'━' * 28}\n"
+        msg += f"{own_emoji} Ownership: *{'Renounced ✅' if renounced else 'NOT Renounced ⚠️'}*\n"
+        msg += f"{'✅' if not is_honeypot else '🚨'} Honeypot: *{'SAFE' if not is_honeypot else 'DETECTED ⚠️'}*\n"
+        msg += f"{lp_emoji} LP Lock: *{'YES' if liquidity_locked else 'NO'}*"
+        if liquidity_locked and lock_days > 0:
+            msg += f" ({lock_days}d via {locker_name})"
+        msg += "\n"
+        msg += f"{tax_emoji} Tax: B: {buy_tax:.1f}% | S: {sell_tax:.1f}% | Total: {total_tax:.1f}%\n"
+        msg += f"🔒 Score: {score_bar(sec_score)}\n\n"
+
+        # Token Info
+        msg += f"{'━' * 28}\n"
+        msg += f"📋 *TOKEN*\n"
+        msg += f"{'━' * 28}\n"
+        msg += f"Supply: *{supply_formatted:,.0f}*\n"
+        msg += f"Decimals: *{decimals}*\n\n"
+
+        # Premium section
+        if is_premium:
+            msg += f"{'━' * 28}\n"
+            msg += f"💎 *PREMIUM INTEL*\n"
+            msg += f"{'━' * 28}\n"
+            if ath_value and ath_value > 0 and market_cap > 0:
+                ath_mult = ath_value / market_cap if market_cap > 0 else 0
+                msg += f"🔝 ATH MC: {fmt(ath_value)}"
+                if ath_mult > 1:
+                    msg += f" ({ath_mult:.1f}x from current)"
+                msg += "\n"
+            msg += f"🦅 DexScreener: {'Paid ✅' if dex_paid else 'Not paid'}\n"
+            msg += "\n"
+        else:
+            msg += f"💡 _Upgrade to Premium for ATH tracking & advanced intel_\n\n"
+
+        # Contract
+        msg += f"`{token_address}`\n\n"
+        msg += f"⚠️ _DYOR! Not financial advice._"
+
+        # Create action buttons - Soul Scanner style quick links
         keyboard = [
             [
-                InlineKeyboardButton("🔍 View on Basescan", url=f"https://basescan.org/token/{token_address}"),
+                InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/base/{token_address}"),
+                InlineKeyboardButton("🔍 Scan", url=f"https://basescan.org/token/{token_address}"),
+                InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{token_address}")
             ],
             [
-                InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/base/{token_address}"),
-                InlineKeyboardButton("🦄 Uniswap", url=f"https://app.uniswap.org/#/tokens/base/{token_address}")
+                InlineKeyboardButton("🎯 Snipe", callback_data=f"snipe_{token_address}"),
+                InlineKeyboardButton("💰 Buy 0.01 ETH", callback_data=f"buy_0.01_{token_address}"),
             ],
             [
-                InlineKeyboardButton("« Back to Menu", callback_data="menu")
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"check_{token_address}"),
+                InlineKeyboardButton("« Menu", callback_data="menu")
             ]
         ]
 
-        await analyzing_msg.edit_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await analyzing_msg.edit_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Token analysis error: {e}")
