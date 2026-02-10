@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from web3 import Web3
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeAllGroupChats
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
 from database import UserDatabase
 from trading import TradingBot
 from security_scanner import SecurityScanner
@@ -3184,8 +3184,15 @@ async def scan_loop(app: Application):
 # ===== AUTO GROUP DETECTION HANDLERS =====
 
 async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle when bot is added to a group"""
+    """Handle when bot is added to a group - detect via new_chat_members"""
     try:
+        # Check if the BOT was one of the new members
+        new_members = update.message.new_chat_members if update.message else []
+        bot_was_added = any(member.id == context.bot.id for member in new_members)
+        
+        if not bot_was_added:
+            return  # Some other user was added, not us
+        
         chat = update.effective_chat
         if chat.type in ['group', 'supergroup']:
             group_id = chat.id
@@ -3199,32 +3206,79 @@ async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TY
             
             # Send welcome message
             welcome_msg = (
-                f"👋 Hello! I'm the Base Fair Launch Sniper Bot\n\n"
-                f"✨ I will automatically post good-rated projects here!\n\n"
-                f"🛡️ Only projects with 70+ security rating will be posted\n"
-                f"💳 Click 'Buy Now' to execute instant trades\n\n"
-                f"📊 Group auto-enabled for posting!\n"
-                f"Waiting for new fair launches..."
+                f"👋 Hello! I'm the *Base Fair Launch Sniper Bot*\n\n"
+                f"✨ I will automatically post new token launches here!\n\n"
+                f"🔍 *What I do:*\n"
+                f"• Scan ALL new token launches on Base chain\n"
+                f"• Post with safety score & market data\n"
+                f"• Auto-delete posts after 5 minutes\n"
+                f"• Cooldown: 3 posts, then 5 min pause\n\n"
+                f"📊 Group ID: `{group_id}` ✅ Registered!\n"
+                f"🔄 Waiting for new fair launches..."
             )
             
             await context.bot.send_message(
                 chat_id=group_id,
-                text=welcome_msg
+                text=welcome_msg,
+                parse_mode='Markdown'
             )
     except Exception as e:
         logger.error(f"Error handling bot added to group: {e}")
 
+async def on_my_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle chat member status changes for the bot itself (more reliable detection)"""
+    try:
+        my_chat_member = update.my_chat_member
+        if not my_chat_member:
+            return
+        
+        chat = my_chat_member.chat
+        new_status = my_chat_member.new_chat_member.status
+        old_status = my_chat_member.old_chat_member.status if my_chat_member.old_chat_member else None
+        
+        if chat.type in ['group', 'supergroup']:
+            # Bot was added or promoted to admin
+            if new_status in ['member', 'administrator'] and old_status in [None, 'left', 'kicked']:
+                group_id = chat.id
+                group_name = chat.username or "private_group"
+                group_title = chat.title or "Group"
+                
+                db.add_group(group_id, group_name, group_title)
+                logger.info(f"🎉 Bot added to group (via my_chat_member): {group_title} (ID: {group_id})")
+                
+                welcome_msg = (
+                    f"👋 Hello! I'm the *Base Fair Launch Sniper Bot*\n\n"
+                    f"✨ I will automatically post new token launches here!\n\n"
+                    f"📊 Group registered! ID: `{group_id}` ✅\n"
+                    f"🔄 Waiting for new fair launches..."
+                )
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=group_id,
+                        text=welcome_msg,
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass  # May not have permission to send yet
+            
+            # Bot was removed or kicked
+            elif new_status in ['left', 'kicked']:
+                group_id = chat.id
+                db.remove_group(group_id)
+                logger.info(f"👋 Bot removed from group: {chat.title} (ID: {group_id})")
+    except Exception as e:
+        logger.error(f"Error handling my_chat_member update: {e}")
+
 async def on_bot_removed_from_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle when bot is removed from a group"""
+    """Handle when bot is removed from a group via left_chat_member"""
     try:
         chat = update.effective_chat
-        if chat.type in ['group', 'supergroup']:
-            group_id = chat.id
-            
-            # Remove from database
-            db.remove_group(group_id)
-            
-            logger.info(f"👋 Bot removed from group (ID: {group_id})")
+        if chat and chat.type in ['group', 'supergroup']:
+            left_member = update.message.left_chat_member if update.message else None
+            if left_member and left_member.id == context.bot.id:
+                db.remove_group(chat.id)
+                logger.info(f"👋 Bot removed from group: {chat.title} (ID: {chat.id})")
     except Exception as e:
         logger.error(f"Error handling bot removed from group: {e}")
 
@@ -3322,6 +3376,7 @@ async def main():
     # Add handlers for automatic group detection (always enabled)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_bot_added_to_group))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_removed_from_group))
+    app.add_handler(ChatMemberHandler(on_my_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
     logger.info(f"✅ Bot username: @{BOT_USERNAME}")
     logger.info("✅ Database initialized")
