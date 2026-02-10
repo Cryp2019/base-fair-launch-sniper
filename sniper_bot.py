@@ -760,24 +760,44 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
 
 # ===== ALERT FUNCTIONS =====
 
+# Group posting cooldown tracker
+_group_post_count = 0
+_group_post_cooldown_until = 0  # timestamp when cooldown ends
+
+async def _auto_delete_message(app: Application, chat_id: int, message_id: int, delay: int = 300):
+    """Delete a message after delay seconds (default 5 minutes)"""
+    try:
+        await asyncio.sleep(delay)
+        await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.debug(f"🗑️ Auto-deleted message {message_id} from group {chat_id}")
+    except Exception as e:
+        logger.debug(f"Could not auto-delete message {message_id}: {e}")
+
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
-    """Post QUALITY projects to bot's group with Buy Now button"""
+    """Post ALL projects to groups with Buy Now button + cooldown + auto-delete"""
+    global _group_post_count, _group_post_cooldown_until
+    
     if not GROUP_POSTER_AVAILABLE or not group_poster:
-        return  # Group posting disabled
+        logger.debug("Group poster not available, skipping group post")
+        return
     
     try:
-        # Get security rating first
-        contract = analysis.get('token_address')
-        rating = security_scanner.scan_token(contract) if security_scanner else {}
-        score = rating.get('score', 0)
-        
-        # Quality filter for group posts (lower threshold since LP lock detection is limited)
-        MIN_QUALITY_SCORE = 50
-        if score < MIN_QUALITY_SCORE:
-            logger.info(f"⏭️  {analysis.get('name')} rated {score}/100 - Below quality threshold ({MIN_QUALITY_SCORE}+). Skipping group post.")
+        # Check cooldown: after 3 posts, pause for 5 minutes
+        now = time.time()
+        if _group_post_cooldown_until > now:
+            remaining = int(_group_post_cooldown_until - now)
+            logger.info(f"⏳ Group post cooldown active ({remaining}s remaining). Skipping: {analysis.get('name')}")
             return
         
-        logger.info(f"✨ HIGH QUALITY PROJECT: {analysis.get('name')} rated {score}/100 - POSTING TO GROUPS!")
+        # Get security rating for display (NOT for filtering)
+        contract = analysis.get('token_address')
+        try:
+            rating = security_scanner.scan_token(contract) if security_scanner else {}
+        except Exception:
+            rating = {'score': 50, 'warnings': [], 'risk_level': 'UNKNOWN'}
+        score = rating.get('score', 50)
+        
+        logger.info(f"📢 Posting to groups: {analysis.get('name')} (score: {score}/100)")
         
         # Create enriched project data with all analysis info
         project_data = {
@@ -812,20 +832,32 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             # Post to each group
             for group in all_groups:
                 try:
-                    await app.bot.send_message(
+                    sent_msg = await app.bot.send_message(
                         chat_id=group['group_id'],
                         text=message_text,
                         reply_markup=reply_markup,
                         parse_mode='HTML'
                     )
                     db.update_group_post_count(group['group_id'])
-                    logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']} ({score}/100)")
+                    logger.info(f"📢 Posted to group {group['group_id']}: {project_data['name']} (score: {score}/100)")
+                    
+                    # Schedule auto-delete after 5 minutes
+                    asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                    
                 except Exception as e:
                     logger.warning(f"Failed to post to group {group['group_id']}: {e}")
+            
+            # Increment post counter and check cooldown
+            _group_post_count += 1
+            if _group_post_count >= 3:
+                _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
+                _group_post_count = 0
+                logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
         else:
             logger.info(f"No groups configured. Add bot to a group for auto-posting!")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
+
 
 async def send_launch_alert(app: Application, analysis: dict):
     """Send alert for new token launch - includes safety score for user reference"""
