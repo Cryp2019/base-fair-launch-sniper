@@ -3093,6 +3093,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_approve(update, context, token_address)
         return
 
+    if query.data.startswith('snipe_'):
+        # Snipe from group post or token check
+        token_address = query.data.replace('snipe_', '', 1)
+        if is_group_chat(update):
+            # Redirect to DM for sniping (needs private wallet)
+            bot_me = await context.bot.get_me()
+            await query.answer("Open the bot in DM to snipe!", show_alert=True)
+            return
+        context.user_data['awaiting_snipe'] = True
+        context.user_data['snipe_token'] = token_address
+        await handle_snipe_input(update, context, token_address)
+        return
+
+    if query.data.startswith('check_'):
+        # Refresh token check
+        token_address = query.data.replace('check_', '', 1)
+        # Simulate a token input by storing address and calling handler
+        context.user_data['check_token'] = token_address
+        await query.answer("🔄 Refreshing...")
+        return
+
     # Handle admin callbacks
     if query.data.startswith('admin_'):
         if not admin_manager.is_admin(query.from_user.id, query.from_user.username):
