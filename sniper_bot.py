@@ -805,36 +805,75 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         vol = fmt(metrics.get('volume_24h', 0))
         
         # Score emoji
-        if score >= 75: score_line = f"🟢 {score}/100 (LOW RISK)"
-        elif score >= 50: score_line = f"🟡 {score}/100 (MEDIUM)"
-        elif score >= 25: score_line = f"🔴 {score}/100 (HIGH RISK)"
-        else: score_line = f"⛔ {score}/100 (DANGER)"
+        if score >= 75: score_emoji = "🟢"
+        elif score >= 50: score_emoji = "🟡"
+        elif score >= 25: score_emoji = "🔴"
+        else: score_emoji = "⛔"
         
         # Safety details
         renounced = analysis.get('renounced', False)
         honeypot = analysis.get('is_honeypot', False)
-        risk_level = analysis.get('risk_level', 'UNKNOWN')
-        warnings = analysis.get('warnings', [])
-        own_status = '✅ Renounced' if renounced else '⚠️ Active'
-        hp_status = '✅ Safe' if not honeypot else '🚨 DANGER'
-        warn_line = f"⚠️ {len(warnings)} warning(s)" if warnings else "✅ No warnings"
+        lp_locked = analysis.get('liquidity_locked', False)
+        lock_days = analysis.get('lock_days', 0)
+        buy_tax = analysis.get('buy_tax', 0)
+        sell_tax = analysis.get('sell_tax', 0)
+        
+        # Status emojis
+        own_emoji = '✅' if renounced else '⚠️'
+        hp_emoji = '✅' if not honeypot else '🚨'
+        lp_emoji = '✅' if lp_locked else '❌'
         
         launch_time = datetime.now(timezone.utc).strftime("%H:%M UTC")
         
-        # Build message (HTML format for groups)
+        # Price info
+        price_usd = metrics.get('price_usd', 0)
+        price_str = f"${price_usd:.8f}" if price_usd > 0 else "N/A"
+        price_change = metrics.get('price_change_24h', 0)
+        change_emoji = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪"
+        change_str = f"{change_emoji} {'+' if price_change > 0 else ''}{price_change:.2f}%"
+        
+        # Token scores (reuse from analysis if available)
+        try:
+            scores = calculate_token_scores(analysis, metrics)
+            social_score = format_score(scores['social_score'])
+            viral_score = format_score(scores['viral_score'])
+            security_score_str = format_score(scores['security_score'])
+            overall_score = format_score(scores['overall_score'])
+        except Exception:
+            social_score = "N/A"
+            viral_score = "N/A"
+            security_score_str = f"{score_emoji} {score}/100"
+            overall_score = f"{score_emoji} {score}/100"
+        
+        # Build message (HTML format - matching DM design)
         message_text = (
             f"🚀 <b>NEW TOKEN LAUNCH</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<b>{name}</b> (${symbol})\n"
-            f"{dex_emoji} {dex_name} • {launch_time}\n\n"
-            f"💰 MC: <b>{mc}</b>\n"
-            f"💧 Liq: <b>{liq}</b>\n"
-            f"📊 Vol 24h: <b>{vol}</b>\n\n"
-            f"🛡 <b>SAFETY SCORE: {score_line}</b>\n"
-            f"👤 Owner: {own_status}\n"
-            f"🍯 Honeypot: {hp_status}\n"
-            f"📋 {warn_line}\n\n"
-            f"📍 <code>{contract}</code>\n\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"<b>{name}</b> (${symbol})\n\n"
+            f"📊 <b>LIVE MARKET DATA</b>\n"
+            f"💰 Price: {price_str}\n"
+            f"🏦 Market Cap: <b>{mc}</b>\n"
+            f"📊 Volume (24h): {vol}\n"
+            f"💧 Liquidity: {liq}\n"
+            f"📉 Change (24h): {change_str}\n"
+            f"🏪 DEX: {dex_name} {dex_emoji}\n"
+            f"🚀 Release: {launch_time}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🎱 <b>TOKEN SCORES</b>\n"
+            f"📱 Social Score: {social_score}\n"
+            f"🚀 Viral Score: {viral_score}\n"
+            f"🔒 Security Score: {security_score_str}\n"
+            f"⭐️ Overall Score: {overall_score}\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"🛡️ <b>SAFETY CHECKS</b>\n"
+            f"{own_emoji} Ownership: {'Renounced ✅' if renounced else 'NOT Renounced ⚠️'}\n"
+            f"{hp_emoji} Honeypot: {'SAFE' if not honeypot else 'DETECTED ⚠️'}\n"
+            f"{lp_emoji} LP Locked: {'YES' if lp_locked else 'NO'}"
+            f"{f' ({lock_days} days)' if lp_locked and lock_days else ''}\n"
+            f"🏧 Taxes: B:{buy_tax:.1f}% S:{sell_tax:.1f}%\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"📍 <b>CONTRACT</b>\n"
+            f"<code>{contract}</code>\n\n"
             f"⚠️ <i>DYOR! Not financial advice.</i>"
         )
         
