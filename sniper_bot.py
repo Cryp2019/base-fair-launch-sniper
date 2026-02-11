@@ -787,21 +787,24 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
 _group_post_count = 0
 _group_post_cooldown_until = 0  # timestamp when cooldown ends
 
+# Track background tasks to prevent garbage collection
+_background_tasks = set()
+
 async def _auto_delete_message(app: Application, chat_id: int, message_id: int, delay: int = 300):
     """Delete a message after delay seconds (default 5 minutes)"""
     try:
         await asyncio.sleep(delay)
         await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"🗑️ Auto-deleted message {message_id} from group {chat_id}")
+        logger.info(f"🗑️ Auto-deleted message {message_id} from group {chat_id}")
     except Exception as e:
-        logger.debug(f"Could not auto-delete message {message_id}: {e}")
+        logger.warning(f"Could not auto-delete message {message_id}: {e}")
 
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
     """Post ALL projects to groups - formats messages directly (no external dependencies)"""
     global _group_post_count, _group_post_cooldown_until
     
     try:
-        # Check cooldown: after 5 posts, pause for 2 minutes
+        # Check cooldown: after 3 posts, pause for 5 minutes
         now = time.time()
         if _group_post_cooldown_until > now:
             remaining = int(_group_post_cooldown_until - now)
@@ -972,7 +975,10 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
                 
                 # Schedule auto-delete after 5 minutes (skip for sponsored)
                 if not is_sponsored:
-                    asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                    task = asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                    _background_tasks.add(task)
+                    task.add_done_callback(_background_tasks.discard)
+                    logger.info(f"⏰ Auto-delete scheduled in 5 min for msg {sent_msg.message_id}")
                 else:
                     logger.info(f"⭐ Sponsored post stays permanently: {name}")
                 
