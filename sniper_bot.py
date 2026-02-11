@@ -805,15 +805,19 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         vol = fmt(metrics.get('volume_24h', 0))
         
         # Score emoji
-        if score >= 75: score_line = f"🟢 {score}/100"
-        elif score >= 50: score_line = f"🟡 {score}/100"
-        else: score_line = f"🔴 {score}/100"
+        if score >= 75: score_line = f"🟢 {score}/100 (LOW RISK)"
+        elif score >= 50: score_line = f"🟡 {score}/100 (MEDIUM)"
+        elif score >= 25: score_line = f"🔴 {score}/100 (HIGH RISK)"
+        else: score_line = f"⛔ {score}/100 (DANGER)"
         
         # Safety details
         renounced = analysis.get('renounced', False)
         honeypot = analysis.get('is_honeypot', False)
+        risk_level = analysis.get('risk_level', 'UNKNOWN')
+        warnings = analysis.get('warnings', [])
         own_status = '✅ Renounced' if renounced else '⚠️ Active'
         hp_status = '✅ Safe' if not honeypot else '🚨 DANGER'
+        warn_line = f"⚠️ {len(warnings)} warning(s)" if warnings else "✅ No warnings"
         
         launch_time = datetime.now(timezone.utc).strftime("%H:%M UTC")
         
@@ -826,10 +830,11 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             f"💰 MC: <b>{mc}</b>\n"
             f"💧 Liq: <b>{liq}</b>\n"
             f"📊 Vol 24h: <b>{vol}</b>\n\n"
-            f"🛡 Safety: {score_line}\n"
+            f"🛡 <b>SAFETY SCORE: {score_line}</b>\n"
             f"👤 Owner: {own_status}\n"
-            f"🍯 Honeypot: {hp_status}\n\n"
-            f"📋 <code>{contract}</code>\n\n"
+            f"🍯 Honeypot: {hp_status}\n"
+            f"📋 {warn_line}\n\n"
+            f"📍 <code>{contract}</code>\n\n"
             f"⚠️ <i>DYOR! Not financial advice.</i>"
         )
         
@@ -907,6 +912,16 @@ async def send_launch_alert(app: Application, analysis: dict):
     score = rating.get('score', 50)  # Default to 50 if scan fails
     analysis['security_score'] = score
     analysis['security_rating'] = rating
+    
+    # Enrich analysis with security details for group posting
+    rug_data = rating.get('rug_detection', {})
+    hp_data = rating.get('honeypot', {})
+    analysis['is_honeypot'] = hp_data.get('is_honeypot', False)
+    analysis['risk_level'] = rating.get('risk_level', 'UNKNOWN')
+    analysis['warnings'] = rating.get('warnings', [])
+    # Only override renounced if scanner found a result
+    if 'ownership_renounced' in rug_data:
+        analysis['renounced'] = rug_data['ownership_renounced']
     
     logger.info(f"📢 Sending alert for {analysis.get('name')} (safety score: {score}/100)")
 
