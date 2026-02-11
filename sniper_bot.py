@@ -837,11 +837,11 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         keyboard = [
             [
                 InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/base/{contract}"),
-                InlineKeyboardButton("🔍 Scan", url=f"https://basescan.org/token/{contract}"),
+                InlineKeyboardButton("🔍 Scan", url=f"https://t.me/{BOT_USERNAME}?start=scan_{contract}"),
             ],
             [
                 InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{contract}"),
-                InlineKeyboardButton("🎯 Snipe", callback_data=f"snipe_{contract}"),
+                InlineKeyboardButton("🎯 Buy 0.01 ETH", callback_data=f"buy_0.01_{contract}"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1187,6 +1187,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ignore the 'group' arg from DM redirect
     if referrer_code == 'group':
         referrer_code = None
+    
+    # Handle scan deep link: /start scan_0xABC...
+    if referrer_code and referrer_code.startswith('scan_'):
+        token_address = referrer_code.replace('scan_', '', 1)
+        # Register user first
+        db.add_user(user_id=user.id, username=user.username, first_name=user.first_name)
+        # Simulate token check by storing the address and triggering the handler
+        context.user_data['awaiting_check'] = True
+        context.user_data['check_token'] = token_address
+        # Send analyzing msg and run check
+        analyzing_msg = await update.message.reply_text("🔍 Scanning token... Please wait...")
+        # Create a fake update-like context to reuse handle_token_input logic
+        update.message.text = token_address
+        await handle_token_input(update, context)
+        return
 
     result = db.add_user(
         user_id=user.id,
