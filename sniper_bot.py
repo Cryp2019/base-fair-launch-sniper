@@ -45,6 +45,14 @@ except ImportError:
     GROUP_POSTER_AVAILABLE = False
     GroupPoster = None
 
+# Import on-chain analyzer for Soul Scanner-style analytics
+try:
+    from onchain_analyzer import OnChainAnalyzer, format_onchain_section_html, format_onchain_section_markdown
+    ONCHAIN_AVAILABLE = True
+except ImportError as e:
+    ONCHAIN_AVAILABLE = False
+    logger.warning(f"⚠️ On-chain analyzer not available: {e}")
+
 # Load environment variables
 if os.path.exists('.env'):
     with open('.env') as f:
@@ -136,6 +144,9 @@ else:
     
 trading_bot = TradingBot(w3)
 security_scanner = SecurityScanner(w3)
+onchain_analyzer = OnChainAnalyzer(w3) if ONCHAIN_AVAILABLE else None
+if onchain_analyzer:
+    logger.info("✅ On-chain analyzer initialized")
 admin_manager = AdminManager(db, w3)
 
 # Initialize group poster if available
@@ -871,6 +882,22 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             f"{lp_emoji} LP Locked: {'YES' if lp_locked else 'NO'}"
             f"{f' ({lock_days} days)' if lp_locked and lock_days else ''}\n"
             f"🏧 Taxes: B:{buy_tax:.1f}% S:{sell_tax:.1f}%\n"
+        )
+        
+        # Add on-chain analytics section
+        if onchain_analyzer:
+            try:
+                onchain_data = onchain_analyzer.analyze_token_onchain(
+                    contract,
+                    pair_address=analysis.get('pair_address'),
+                    total_supply=analysis.get('total_supply', 0),
+                    decimals=analysis.get('decimals', 18)
+                )
+                message_text += format_onchain_section_html(onchain_data)
+            except Exception as e:
+                logger.warning(f"On-chain analysis failed for group post: {e}")
+        
+        message_text += (
             f"━━━━━━━━━━━━━━━━\n\n"
             f"📍 <b>CONTRACT</b>\n"
             f"<code>{contract}</code>\n\n"
@@ -1069,6 +1096,20 @@ async def send_launch_alert(app: Application, analysis: dict):
     # Calculate token scores
     scores = calculate_token_scores(analysis, metrics)
     
+    # Run on-chain analysis once (shared across all DM alerts)
+    onchain_section_md = ""
+    if onchain_analyzer:
+        try:
+            onchain_data = onchain_analyzer.analyze_token_onchain(
+                analysis['token_address'],
+                pair_address=analysis.get('pair_address'),
+                total_supply=analysis.get('total_supply', 0),
+                decimals=analysis.get('decimals', 18)
+            )
+            onchain_section_md = format_onchain_section_markdown(onchain_data)
+        except Exception as e:
+            logger.warning(f"On-chain analysis failed for DM alerts: {e}")
+    
     # PRIORITY ALERTS: Send to premium users FIRST (5-10 seconds faster)
     for user in premium_users:
         try:
@@ -1100,8 +1141,13 @@ async def send_launch_alert(app: Application, analysis: dict):
             if analysis.get('liquidity_locked'):
                 message += f" ({analysis.get('lock_days', 0)} days)"
             
+            message += f"\n🏧 Taxes: B:{buy_tax:.1f}% S:{sell_tax:.1f}%\n"
+            
+            # Add on-chain analytics
+            if onchain_section_md:
+                message += onchain_section_md
+            
             message += (
-                f"\n🏧 Taxes: B:{buy_tax:.1f}% S:{sell_tax:.1f}%\n"
                 f"━━━━━━━━━━━━━━━━\n\n"
                 f"📍 *CONTRACT*\n"
                 f"`{analysis['token_address']}`\n\n"
@@ -1137,6 +1183,13 @@ async def send_launch_alert(app: Application, analysis: dict):
         f"🛡️ *SAFETY*\n"
         f"{status_emoji} Ownership: {'Renounced ✅' if analysis['renounced'] else 'NOT Renounced ⚠️'}\n"
         f"{'✅' if not analysis.get('is_honeypot') else '🚨'} Honeypot: {'SAFE' if not analysis.get('is_honeypot') else 'DETECTED ⚠️'}\n"
+    )
+    
+    # Add on-chain analytics to free alerts too
+    if onchain_section_md:
+        free_message += onchain_section_md
+    
+    free_message += (
         f"━━━━━━━━━━━━━━━━\n\n"
         f"📍 `{analysis['token_address']}`\n\n"
         f"💡 *Upgrade to Premium for advanced metrics!*\n"
