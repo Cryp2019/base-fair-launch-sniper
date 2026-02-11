@@ -1213,10 +1213,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 InlineKeyboardButton("0.005 ETH", callback_data=f"buy_0.005_{token_address}"),
                 InlineKeyboardButton("0.01 ETH", callback_data=f"buy_0.01_{token_address}"),
+                InlineKeyboardButton("0.025 ETH", callback_data=f"buy_0.025_{token_address}"),
             ],
             [
                 InlineKeyboardButton("0.05 ETH", callback_data=f"buy_0.05_{token_address}"),
                 InlineKeyboardButton("0.1 ETH", callback_data=f"buy_0.1_{token_address}"),
+                InlineKeyboardButton("0.25 ETH", callback_data=f"buy_0.25_{token_address}"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Custom Amount", callback_data=f"buy_custom_{token_address}"),
             ],
             [
                 InlineKeyboardButton("🔍 Scan First", callback_data=f"check_{token_address}"),
@@ -2421,6 +2426,26 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     text = update.message.text.strip()
 
+    # Handle custom buy amount input
+    if context.user_data.get('awaiting_custom_buy'):
+        context.user_data['awaiting_custom_buy'] = False
+        token_address = context.user_data.get('custom_buy_token', '')
+        try:
+            eth_amount = float(text)
+            if eth_amount <= 0 or eth_amount > 10:
+                await update.message.reply_text(
+                    "❌ Invalid amount! Enter between 0.001 and 10 ETH.",
+                    parse_mode='Markdown'
+                )
+                return
+            await handle_buy(update, context, eth_amount, token_address)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Invalid number! Please enter a valid ETH amount (e.g. `0.05`).",
+                parse_mode='Markdown'
+            )
+        return
+
     # Check if user is waiting for snipe input
     if context.user_data.get('waiting_for_snipe'):
         await handle_snipe_input(update, context, text)
@@ -3120,7 +3145,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         parts = query.data.split('_')
         if parts[1] == 'custom':
-            await query.answer("Custom buy amount coming soon!", show_alert=True)
+            token_address = '_'.join(parts[2:])
+            context.user_data['awaiting_custom_buy'] = True
+            context.user_data['custom_buy_token'] = token_address
+            await query.answer()
+            await query.message.reply_text(
+                f"✏️ *Enter custom ETH amount to buy:*\n\n"
+                f"Token: `{token_address}`\n\n"
+                f"Type the amount in ETH (e.g. `0.03` or `0.5`):",
+                parse_mode='Markdown'
+            )
             return
         eth_amount = float(parts[1])
         token_address = '_'.join(parts[2:])
