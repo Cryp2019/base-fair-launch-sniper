@@ -789,7 +789,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
     global _group_post_count, _group_post_cooldown_until
     
     try:
-        # Check cooldown: after 3 posts, pause for 5 minutes
+        # Check cooldown: after 5 posts, pause for 2 minutes
         now = time.time()
         if _group_post_cooldown_until > now:
             remaining = int(_group_post_cooldown_until - now)
@@ -901,7 +901,10 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             f"━━━━━━━━━━━━━━━━\n\n"
             f"📍 <b>CONTRACT</b>\n"
             f"<code>{contract}</code>\n\n"
-            f"⚠️ <i>DYOR! Not financial advice.</i>"
+            f"⚠️ <i>DYOR! Not financial advice.</i>\n\n"
+            f"📣 <b>Want your project featured?</b>\n"
+            f"Contact @{BOT_USERNAME} for promoted listings!\n"
+            f"🚀 Reach 1000s of active Base traders"
         )
         
         # Action buttons - all redirect to DM for privacy
@@ -913,6 +916,9 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             [
                 InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{contract}"),
                 InlineKeyboardButton("🎯 Buy", url=f"https://t.me/{BOT_USERNAME}?start=buy_{contract}"),
+            ],
+            [
+                InlineKeyboardButton("📣 Advertise Your Project", url=f"https://t.me/{BOT_USERNAME}?start=advertise"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -955,10 +961,10 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         
         # Increment post counter and check cooldown
         _group_post_count += 1
-        if _group_post_count >= 3:
-            _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
+        if _group_post_count >= 5:
+            _group_post_cooldown_until = time.time() + 120  # 2 minute cooldown
             _group_post_count = 0
-            logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
+            logger.info(f"⏳ Cooldown activated: 5 posts sent, pausing group posts for 2 minutes")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
         import traceback
@@ -1337,6 +1343,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text(
             buy_msg,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    # Handle advertise deep link: /start advertise
+    if referrer_code and referrer_code == 'advertise':
+        db.add_user(user_id=user.id, username=user.username, first_name=user.first_name)
+        ad_msg = (
+            f"📣 *ADVERTISE YOUR PROJECT*\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"Get your token in front of *thousands* of active Base traders!\n\n"
+            f"🎯 *What you get:*\n"
+            f"• Featured spot in all group alerts\n"
+            f"• Pinned announcement in all groups\n"
+            f"• Priority listing on new launch alerts\n"
+            f"• Direct exposure to verified traders\n\n"
+            f"💎 *Advertising Tiers:*\n"
+            f"🥉 Bronze — 0.05 ETH / 24h\n"
+            f"🥈 Silver — 0.1 ETH / 3 days\n"
+            f"🥇 Gold — 0.25 ETH / 7 days\n"
+            f"💎 Diamond — 0.5 ETH / 14 days\n\n"
+            f"📩 *To get started:*\n"
+            f"Send /advertise or DM @cccryp with:\n"
+            f"1. Your project name\n"
+            f"2. Contract address\n"
+            f"3. Preferred tier\n\n"
+            f"🚀 *Reach 1000s of active Base traders today!*"
+        )
+        keyboard = [
+            [InlineKeyboardButton("📩 Contact for Ads", url="https://t.me/cccryp")],
+            [InlineKeyboardButton("📋 Menu", callback_data="menu")]
+        ]
+        await update.message.reply_text(
+            ad_msg,
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
