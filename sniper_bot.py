@@ -833,7 +833,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             f"⚠️ <i>DYOR! Not financial advice.</i>"
         )
         
-        # Action buttons
+        # Action buttons - all redirect to DM for privacy
         keyboard = [
             [
                 InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/base/{contract}"),
@@ -841,7 +841,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             ],
             [
                 InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{contract}"),
-                InlineKeyboardButton("🎯 Buy 0.01 ETH", callback_data=f"buy_0.01_{contract}"),
+                InlineKeyboardButton("🎯 Buy", url=f"https://t.me/{BOT_USERNAME}?start=buy_{contract}"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1193,14 +1193,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_address = referrer_code.replace('scan_', '', 1)
         # Register user first
         db.add_user(user_id=user.id, username=user.username, first_name=user.first_name)
-        # Simulate token check by storing the address and triggering the handler
-        context.user_data['awaiting_check'] = True
-        context.user_data['check_token'] = token_address
-        # Send analyzing msg and run check
-        analyzing_msg = await update.message.reply_text("🔍 Scanning token... Please wait...")
-        # Create a fake update-like context to reuse handle_token_input logic
+        # Trigger token check in DM
         update.message.text = token_address
         await handle_token_input(update, context)
+        return
+    
+    # Handle buy deep link: /start buy_0xABC...
+    if referrer_code and referrer_code.startswith('buy_'):
+        token_address = referrer_code.replace('buy_', '', 1)
+        # Register user first
+        db.add_user(user_id=user.id, username=user.username, first_name=user.first_name)
+        # Show buy options in DM
+        buy_msg = (
+            f"🎯 *Buy Token*\n\n"
+            f"Contract: `{token_address}`\n\n"
+            f"Select amount to buy:"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("0.005 ETH", callback_data=f"buy_0.005_{token_address}"),
+                InlineKeyboardButton("0.01 ETH", callback_data=f"buy_0.01_{token_address}"),
+            ],
+            [
+                InlineKeyboardButton("0.05 ETH", callback_data=f"buy_0.05_{token_address}"),
+                InlineKeyboardButton("0.1 ETH", callback_data=f"buy_0.1_{token_address}"),
+            ],
+            [
+                InlineKeyboardButton("🔍 Scan First", callback_data=f"check_{token_address}"),
+                InlineKeyboardButton("📋 Menu", callback_data="menu"),
+            ]
+        ]
+        await update.message.reply_text(
+            buy_msg,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     result = db.add_user(
@@ -3087,6 +3114,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle buy/sell/approve callbacks
     if query.data.startswith('buy_'):
+        # Block buy in groups - redirect to DM
+        if is_group_chat(update):
+            await query.answer("🔒 Open the bot in DM to buy! Your wallet is private.", show_alert=True)
+            return
         parts = query.data.split('_')
         if parts[1] == 'custom':
             await query.answer("Custom buy amount coming soon!", show_alert=True)
