@@ -72,6 +72,18 @@ BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
 # Payment wallet for sponsorship/payment monitoring (optional)
 payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS') or None
 
+# Sponsored/Promoted projects tracker
+# Key = lowercase token address, Value = {'name': str, 'tier': str, 'expires': timestamp}
+sponsored_projects = {}
+
+# ETH advertising tiers
+AD_TIERS = {
+    0.05: {'name': 'Bronze', 'duration_days': 1, 'emoji': '🥉'},
+    0.1:  {'name': 'Silver', 'duration_days': 3, 'emoji': '🥈'},
+    0.25: {'name': 'Gold', 'duration_days': 7, 'emoji': '🥇'},
+    0.5:  {'name': 'Diamond', 'duration_days': 14, 'emoji': '💎'},
+}
+
 # Base chain addresses
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
@@ -809,6 +821,11 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         
         name = analysis.get('name', 'Unknown')
         symbol = analysis.get('symbol', 'N/A').upper()
+        
+        # Check if this is a sponsored project
+        is_sponsored = contract.lower() in sponsored_projects
+        sponsor_badge = "⭐ SPONSORED ⭐ " if is_sponsored else ""
+        
         dex_name = analysis.get('dex_name', 'Unknown')
         dex_emoji = analysis.get('dex_emoji', '🔷')
         mc = fmt(metrics.get('market_cap', 0))
@@ -858,7 +875,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
         
         # Build message (HTML format - matching DM design)
         message_text = (
-            f"🚀 <b>NEW TOKEN LAUNCH</b>\n"
+            f"{sponsor_badge}🚀 <b>NEW TOKEN LAUNCH</b> {'💎' if is_sponsored else ''}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"<b>{name}</b> (${symbol})\n\n"
             f"📊 <b>LIVE MARKET DATA</b>\n"
@@ -953,18 +970,21 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
                 db.update_group_post_count(group['group_id'])
                 logger.info(f"📢 Posted to group {group['group_id']}: {name} (score: {score}/100)")
                 
-                # Schedule auto-delete after 5 minutes
-                asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                # Schedule auto-delete after 5 minutes (skip for sponsored)
+                if not is_sponsored:
+                    asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                else:
+                    logger.info(f"⭐ Sponsored post stays permanently: {name}")
                 
             except Exception as e:
                 logger.warning(f"Failed to post to group {group['group_id']}: {e}")
         
         # Increment post counter and check cooldown
         _group_post_count += 1
-        if _group_post_count >= 5:
-            _group_post_cooldown_until = time.time() + 120  # 2 minute cooldown
+        if _group_post_count >= 3:
+            _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
             _group_post_count = 0
-            logger.info(f"⏳ Cooldown activated: 5 posts sent, pausing group posts for 2 minutes")
+            logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
         import traceback
@@ -1351,25 +1371,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle advertise deep link: /start advertise
     if referrer_code and referrer_code == 'advertise':
         db.add_user(user_id=user.id, username=user.username, first_name=user.first_name)
+        wallet_display = payment_wallet if payment_wallet else 'Contact @cccryp'
         ad_msg = (
             f"📣 *ADVERTISE YOUR PROJECT*\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"Get your token in front of *thousands* of active Base traders!\n\n"
             f"🎯 *What you get:*\n"
-            f"• Featured spot in all group alerts\n"
-            f"• Pinned announcement in all groups\n"
+            f"• ⭐ SPONSORED badge on all group posts\n"
+            f"• Posts stay permanently (no auto-delete)\n"
             f"• Priority listing on new launch alerts\n"
             f"• Direct exposure to verified traders\n\n"
-            f"💎 *Advertising Tiers:*\n"
+            f"💎 *Advertising Tiers (ETH):*\n"
             f"🥉 Bronze — 0.05 ETH / 24h\n"
             f"🥈 Silver — 0.1 ETH / 3 days\n"
             f"🥇 Gold — 0.25 ETH / 7 days\n"
             f"💎 Diamond — 0.5 ETH / 14 days\n\n"
-            f"📩 *To get started:*\n"
-            f"Send /advertise or DM @cccryp with:\n"
-            f"1. Your project name\n"
-            f"2. Contract address\n"
-            f"3. Preferred tier\n\n"
+            f"💰 *HOW TO PAY (Automatic):*\n"
+            f"1️⃣ Send the exact ETH amount to:\n"
+            f"`{wallet_display}`\n\n"
+            f"2️⃣ After sending, use:\n"
+            f"/advertise <contract\_address> <tx\_hash>\n\n"
+            f"3️⃣ Bot verifies payment automatically\n"
+            f"4️⃣ Your project gets ⭐ SPONSORED badge!\n\n"
             f"🚀 *Reach 1000s of active Base traders today!*"
         )
         keyboard = [
@@ -1762,19 +1785,124 @@ async def earnings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def advertise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show sponsorship/advertising packages"""
-    if SPONSORSHIP_AVAILABLE:
-        from sponsorship_processor import format_payment_instructions
-        wallet = payment_wallet or 'Not configured'
-        msg = format_payment_instructions(wallet)
-    else:
-        msg = (
-            "📢 *PROMOTE YOUR PROJECT*\n\n"
-            "Advertising packages coming soon!\n\n"
-            "Contact @support for early access."
-        )
+    """Handle /advertise command - auto-verify payment and activate sponsorship"""
+    user = update.effective_user
+    args = context.args if context.args else []
     
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="menu")]]
+    # If called with args: /advertise <contract_address> <tx_hash>
+    if len(args) >= 2:
+        token_address = args[0].strip()
+        tx_hash = args[1].strip()
+        
+        await update.message.reply_text("🔍 Verifying payment on-chain... Please wait.")
+        
+        try:
+            # Look up the transaction
+            tx = w3.eth.get_transaction(tx_hash)
+            receipt = w3.eth.get_transaction_receipt(tx_hash)
+            
+            if receipt['status'] != 1:
+                await update.message.reply_text("❌ Transaction failed on-chain. Please try again.")
+                return
+            
+            # Verify payment went to our wallet
+            to_addr = tx['to'].lower() if tx.get('to') else ''
+            expected_wallet = (payment_wallet or '').lower()
+            
+            if not expected_wallet or to_addr != expected_wallet:
+                await update.message.reply_text(
+                    f"❌ Payment not sent to our wallet.\n\n"
+                    f"Expected: `{payment_wallet}`\n"
+                    f"Got: `{tx.get('to', 'N/A')}`",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get ETH amount
+            eth_amount = tx['value'] / 10**18
+            
+            # Find matching tier
+            matched_tier = None
+            for price, tier in AD_TIERS.items():
+                if abs(eth_amount - price) < 0.005:  # Small tolerance
+                    matched_tier = (price, tier)
+                    break
+            
+            if not matched_tier:
+                tier_list = '\n'.join([f"• {p} ETH = {t['name']}" for p, t in AD_TIERS.items()])
+                await update.message.reply_text(
+                    f"❌ Amount {eth_amount:.4f} ETH doesn't match any tier.\n\n"
+                    f"Available tiers:\n{tier_list}",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Activate sponsorship!
+            price, tier = matched_tier
+            import time as _time
+            expires = _time.time() + (tier['duration_days'] * 86400)
+            sponsored_projects[token_address.lower()] = {
+                'name': tier['name'],
+                'tier': tier['emoji'],
+                'expires': expires,
+                'tx_hash': tx_hash,
+                'activated_by': user.id
+            }
+            
+            await update.message.reply_text(
+                f"✅ *SPONSORSHIP ACTIVATED!*\n\n"
+                f"{tier['emoji']} *{tier['name']}* tier confirmed!\n"
+                f"💰 Payment: {eth_amount:.4f} ETH verified ✅\n"
+                f"📍 Token: `{token_address}`\n"
+                f"⏱️ Duration: {tier['duration_days']} day(s)\n\n"
+                f"Your project now gets:\n"
+                f"⭐ SPONSORED badge on all group posts\n"
+                f"📌 Posts stay permanently (no auto-delete)\n"
+                f"🚀 Priority visibility to all traders!\n\n"
+                f"Thank you for advertising with us! 🎉",
+                parse_mode='Markdown'
+            )
+            logger.info(f"⭐ SPONSORSHIP ACTIVATED: {token_address} | {tier['name']} | tx={tx_hash} | by={user.id}")
+            return
+            
+        except Exception as e:
+            logger.error(f"Advertise verification error: {e}")
+            await update.message.reply_text(
+                f"❌ Could not verify transaction.\n\n"
+                f"Error: {str(e)[:100]}\n\n"
+                f"Make sure the tx hash is correct and on Base network."
+            )
+            return
+    
+    # No args: show pricing page
+    wallet_display = payment_wallet if payment_wallet else 'Contact @cccryp'
+    msg = (
+        f"📣 *ADVERTISE YOUR PROJECT*\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"Get your token in front of *thousands* of active Base traders!\n\n"
+        f"⭐ *What you get:*\n"
+        f"• ⭐ SPONSORED badge on all group posts\n"
+        f"• Posts stay permanently (no auto-delete)\n"
+        f"• Priority listing on new launch alerts\n"
+        f"• Direct exposure to verified traders\n\n"
+        f"💎 *Advertising Tiers (ETH):*\n"
+        f"🥉 Bronze — 0.05 ETH / 24h\n"
+        f"🥈 Silver — 0.1 ETH / 3 days\n"
+        f"🥇 Gold — 0.25 ETH / 7 days\n"
+        f"💎 Diamond — 0.5 ETH / 14 days\n\n"
+        f"💰 *HOW TO PAY (Automatic):*\n"
+        f"1️⃣ Send exact ETH amount to:\n"
+        f"`{wallet_display}`\n\n"
+        f"2️⃣ Then run:\n"
+        f"/advertise <contract> <tx\\_hash>\n\n"
+        f"3️⃣ Bot verifies & activates instantly! ⚡\n\n"
+        f"🚀 *Reach 1000s of active Base traders today!*"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📩 Contact for Ads", url="https://t.me/cccryp")],
+        [InlineKeyboardButton("« Back", callback_data="menu")]
+    ]
     
     if update.callback_query:
         await update.callback_query.answer()
