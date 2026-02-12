@@ -804,12 +804,7 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
     global _group_post_count, _group_post_cooldown_until
     
     try:
-        # Check cooldown: after 3 posts, pause for 5 minutes
-        now = time.time()
-        if _group_post_cooldown_until > now:
-            remaining = int(_group_post_cooldown_until - now)
-            logger.info(f"⏳ Group post cooldown active ({remaining}s remaining). Skipping: {analysis.get('name')}")
-            return
+        # No cooldown - post every qualifying token immediately
         
         # Get security score for display
         contract = analysis.get('token_address', '')
@@ -973,24 +968,21 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
                 db.update_group_post_count(group['group_id'])
                 logger.info(f"📢 Posted to group {group['group_id']}: {name} (score: {score}/100)")
                 
-                # Schedule auto-delete after 5 minutes (skip for sponsored)
+                # Schedule auto-delete after 4 minutes (skip for sponsored)
                 if not is_sponsored:
-                    task = asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=300))
+                    task = asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=240))
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
-                    logger.info(f"⏰ Auto-delete scheduled in 5 min for msg {sent_msg.message_id}")
+                    logger.info(f"⏰ Auto-delete scheduled in 4 min for msg {sent_msg.message_id}")
                 else:
                     logger.info(f"⭐ Sponsored post stays permanently: {name}")
                 
             except Exception as e:
                 logger.warning(f"Failed to post to group {group['group_id']}: {e}")
         
-        # Increment post counter and check cooldown
+        # Post count tracking (no cooldown)
         _group_post_count += 1
-        if _group_post_count >= 3:
-            _group_post_cooldown_until = time.time() + 300  # 5 minute cooldown
-            _group_post_count = 0
-            logger.info(f"⏳ Cooldown activated: 3 posts sent, pausing group posts for 5 minutes")
+        logger.info(f"📊 Total group posts this session: {_group_post_count}")
     except Exception as e:
         logger.error(f"Error in group posting: {e}")
         import traceback
