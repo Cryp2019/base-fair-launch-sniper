@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from web3 import Web3
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeAllGroupChats
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeAllGroupChats, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
 from database import UserDatabase
 from trading import TradingBot
@@ -3957,6 +3957,13 @@ async def main():
         logger.info("✅ Bot commands registered globally for all chats")
     except Exception as e:
         logger.warning(f"⚠️ Could not register bot commands: {e}")
+
+    # Enable the blue "Menu" button in all chats
+    try:
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("✅ Command menu button enabled")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not set menu button: {e}")
 
     # Initialize sponsored projects tracking (if available)
     sponsored_projects = None
