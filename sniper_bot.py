@@ -69,6 +69,10 @@ ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
 # Use public Base RPC by default (no rate limits), fall back to Alchemy if BASE_RPC_URL is explicitly set to Alchemy
 BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
 
+# Monad chain RPC
+MONAD_RPC = os.getenv('MONAD_RPC_URL', 'https://rpc.monad.xyz')
+MONAD_ENABLED = os.getenv('MONAD_ENABLED', 'true').lower() == 'true'
+
 # Payment wallet for sponsorship/payment monitoring (optional)
 payment_wallet = os.getenv('PAYMENT_WALLET_ADDRESS') or None
 
@@ -140,6 +144,23 @@ FACTORIES = {
     }
 }
 
+# Monad chain addresses
+MONAD_WETH_ADDRESS = "0xb5a30b0fdc5ea94e93484290556ab11b5066e794".lower()  # Wrapped MON
+MONAD_USDC_ADDRESS = "0xf817257fed379853cde0fa4f97ab987181b1e5ea".lower()  # USDC on Monad
+
+# Monad DEX Factory Configuration
+MONAD_FACTORIES = {
+    'monad_uniswap_v3': {
+        'address': '0x204faca1764b154221e35c0d20abb3c525710498',
+        'type': 'v3',
+        'name': 'Uniswap V3 (Monad)',
+        'emoji': '🟪',
+        'event_topic': '0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118',  # PoolCreated
+        'enabled': True,
+        'chain': 'monad'
+    }
+}
+
 # Keep old FACTORY_ADDRESS for backward compatibility
 FACTORY_ADDRESS = FACTORIES['uniswap_v3']['address']
 
@@ -153,6 +174,22 @@ if w3.is_connected():
     logger.info(f"✅ Connected to Base RPC")
 else:
     logger.error(f"❌ Failed to connect to Base RPC!")
+
+# Monad Web3 connection
+w3_monad = None
+if MONAD_ENABLED:
+    try:
+        w3_monad = Web3(Web3.HTTPProvider(MONAD_RPC))
+        if w3_monad.is_connected():
+            logger.info(f"✅ Connected to Monad RPC")
+        else:
+            logger.warning(f"⚠️ Failed to connect to Monad RPC - Monad scanning disabled")
+            w3_monad = None
+    except Exception as e:
+        logger.warning(f"⚠️ Monad connection failed: {e}")
+        w3_monad = None
+else:
+    logger.info("ℹ️ Monad chain scanning disabled")
     
 trading_bot = TradingBot(w3)
 security_scanner = SecurityScanner(w3)
@@ -353,6 +390,8 @@ def get_new_pairs(last_block: int = None) -> list:
                 try:
                     pool_data = parse_pair_event(log, config['type'], dex_id, config)
                     if pool_data:
+                        pool_data['chain'] = 'base'
+                        pool_data['chain_emoji'] = '🔵'
                         all_pools.append(pool_data)
                         logger.info(f"{config['emoji']} Found new {config['name']} {pool_data['pair_type']} pair: {pool_data['address']}")
                 except Exception as e:
@@ -365,6 +404,56 @@ def get_new_pairs(last_block: int = None) -> list:
 
     all_pools.sort(key=lambda x: x['block'], reverse=True)
     return all_pools
+
+def get_new_pairs_monad(last_block: int = None) -> list:
+    """Scan for new pairs on Monad chain"""
+    if not w3_monad:
+        return []
+    
+    try:
+        if last_block is None:
+            current_block = w3_monad.eth.block_number
+            last_block = current_block - 5
+
+        all_pools = []
+        current_block = w3_monad.eth.block_number
+        to_block = min(last_block + 50, current_block)  # Monad is fast, scan wider range
+        from_block_hex = hex(last_block)
+        to_block_hex = hex(to_block)
+
+        for dex_id, config in MONAD_FACTORIES.items():
+            if not config.get('enabled', True):
+                continue
+                
+            try:
+                logs = w3_monad.eth.get_logs({
+                    'fromBlock': from_block_hex,
+                    'toBlock': to_block_hex,
+                    'address': Web3.to_checksum_address(config['address']),
+                    'topics': [config['event_topic']]
+                })
+
+                for log in logs:
+                    try:
+                        pool_data = parse_pair_event(log, config['type'], dex_id, config)
+                        if pool_data:
+                            pool_data['chain'] = 'monad'
+                            pool_data['chain_emoji'] = '🟣'
+                            all_pools.append(pool_data)
+                            logger.info(f"🟣 Found new Monad {config['name']} {pool_data['pair_type']} pair: {pool_data['address']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to decode Monad {config['name']} log: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Failed to scan Monad {config['name']}: {e}")
+                continue
+
+        all_pools.sort(key=lambda x: x['block'], reverse=True)
+        return all_pools
+    except Exception as e:
+        logger.error(f"Monad scan error: {e}")
+        return []
 
 
 def parse_pair_event(log, dex_type: str, dex_id: str, config: dict) -> dict:
@@ -872,8 +961,10 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             overall_score = f"{score_emoji} {score}/100"
         
         # Build message (HTML format - matching DM design)
+        chain = analysis.get('chain', 'base')
+        chain_label = '🔵 Base' if chain == 'base' else '🟣 Monad'
         message_text = (
-            f"{sponsor_badge}🚀 <b>NEW TOKEN LAUNCH</b> {'💎' if is_sponsored else ''}\n"
+            f"{sponsor_badge}🚀 <b>NEW TOKEN LAUNCH</b> {chain_label} {'💎' if is_sponsored else ''}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"<b>{name}</b> (${symbol})\n\n"
             f"📊 <b>LIVE MARKET DATA</b>\n"
@@ -1262,7 +1353,11 @@ def create_main_menu():
             InlineKeyboardButton("💎 Upgrade", callback_data="upgrade")
         ],
         [
+            InlineKeyboardButton("📣 Advertise", callback_data="advertise_menu"),
             InlineKeyboardButton("ℹ️ How It Works", callback_data="howitworks")
+        ],
+        [
+            InlineKeyboardButton("🔵 Base" + (" + 🟣 Monad" if w3_monad else ""), callback_data="chains_info")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -3541,7 +3636,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'wallets': wallets_callback,
         'create_wallet': create_wallet_callback,
         'export_key': export_key_callback,
-        'advertise': advertise_command
+        'advertise': advertise_command,
+        'advertise_menu': advertise_command,
+        'chains_info': chains_info_callback
     }
 
     handler = handlers.get(query.data)
@@ -3550,10 +3647,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Unknown command!")
 
+async def chains_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show supported chains info"""
+    query = update.callback_query
+    await query.answer()
+    
+    monad_status = "✅ Connected" if w3_monad else "❌ Offline"
+    base_block = "N/A"
+    monad_block = "N/A"
+    try:
+        base_block = f"{w3.eth.block_number:,}"
+    except:
+        pass
+    if w3_monad:
+        try:
+            monad_block = f"{w3_monad.eth.block_number:,}"
+        except:
+            pass
+    
+    msg = (
+        f"⛓️ *SUPPORTED CHAINS*\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"🔵 *Base Chain*\n"
+        f"  Status: ✅ Connected\n"
+        f"  Block: {base_block}\n"
+        f"  DEXs: Uniswap V2/V3, SushiSwap, Aerodrome, BaseSwap, SwapBased\n\n"
+        f"🟣 *Monad Chain*\n"
+        f"  Status: {monad_status}\n"
+        f"  Block: {monad_block}\n"
+        f"  DEXs: Uniswap V3\n\n"
+        f"🔍 The bot scans both chains simultaneously for new token launches!\n"
+        f"🚀 Every qualifying token gets posted automatically."
+    )
+    
+    keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="menu")]]
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
 # ===== SCANNING LOOP =====
 
 async def scan_loop(app: Application):
-    """Continuous scanning for new launches"""
+    """Continuous scanning for new launches on Base + Monad"""
     logger.info("🔍 Starting scan loop...")
     
     # Check how many users have alerts enabled
@@ -3568,37 +3701,62 @@ async def scan_loop(app: Application):
         logger.info(f"   👑 Premium users: {premium_count}")
         logger.info(f"   🆓 Free users: {free_count}")
 
-    # Start from current block
+    # Start from current block — Base
     last_block = w3.eth.block_number
     scanned_pairs = set()
     scan_count = 0
+    
+    # Monad block tracking
+    last_block_monad = None
+    if w3_monad:
+        try:
+            last_block_monad = w3_monad.eth.block_number
+            logger.info(f"🟣 Monad starting block: {last_block_monad:,}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get Monad block: {e}")
 
     while True:
         try:
             scan_count += 1
             
-            # Get new pairs (scans 10 blocks at a time due to Alchemy free tier limit)
+            # ===== SCAN BASE =====
             pairs = get_new_pairs(last_block)
+            
+            # ===== SCAN MONAD =====
+            monad_pairs = []
+            if w3_monad and last_block_monad is not None:
+                try:
+                    monad_pairs = get_new_pairs_monad(last_block_monad)
+                except Exception as e:
+                    logger.warning(f"🟣 Monad scan error: {e}")
+            
+            # Combine all pairs
+            all_pairs = pairs + monad_pairs
             
             # Log scanning activity every 10 scans (~100 seconds)
             if scan_count % 10 == 0:
                 current_block = w3.eth.block_number
-                logger.info(f"🔍 Scan #{scan_count}: Blocks {last_block:,} to {current_block:,} | Pairs found: {len(pairs)} | Total scanned: {len(scanned_pairs)}")
+                monad_info = ""
+                if w3_monad and last_block_monad:
+                    monad_block = w3_monad.eth.block_number
+                    monad_info = f" | 🟣 Monad: {last_block_monad:,}-{monad_block:,}"
+                logger.info(f"🔍 Scan #{scan_count}: 🔵 Base {last_block:,}-{current_block:,}{monad_info} | Pairs: {len(all_pairs)} | Total scanned: {len(scanned_pairs)}")
 
-            if len(pairs) > 0:
-                logger.info(f"✨ Found {len(pairs)} new pair(s) in this scan!")
+            if len(all_pairs) > 0:
+                logger.info(f"✨ Found {len(all_pairs)} new pair(s) in this scan! (Base: {len(pairs)}, Monad: {len(monad_pairs)})")
 
-            for pair in pairs:
+            for pair in all_pairs:
                 pair_address = pair['address']
+                chain = pair.get('chain', 'base')
 
-                # Skip if already scanned
-                if pair_address in scanned_pairs:
+                # Skip if already scanned (prefix with chain to avoid collision)
+                pair_key = f"{chain}:{pair_address}"
+                if pair_key in scanned_pairs:
                     continue
 
-                scanned_pairs.add(pair_address)
+                scanned_pairs.add(pair_key)
 
                 # Analyze the token with premium analytics enabled
-                # (Premium analytics will be included in the data, sent only to premium users)
                 analysis = analyze_token(
                     pair_address, 
                     pair['token0'], 
@@ -3610,31 +3768,46 @@ async def scan_loop(app: Application):
                 )
 
                 if analysis:
-                    logger.info(f"🚀 New launch detected: ${analysis['symbol']} ({analysis['name']}) on {analysis.get('dex_name', 'Unknown')}")
+                    # Tag with chain info
+                    analysis['chain'] = chain
+                    analysis['chain_emoji'] = pair.get('chain_emoji', '🔵')
+                    chain_label = '🔵 Base' if chain == 'base' else '🟣 Monad'
+                    logger.info(f"🚀 New launch on {chain_label}: ${analysis['symbol']} ({analysis['name']}) on {analysis.get('dex_name', 'Unknown')}")
 
-                    # Send alert to all users (premium users get priority + extra data)
+                    # Send alert to all users
                     await send_launch_alert(app, analysis)
                 else:
-                    logger.warning(f"⚠️  Failed to analyze pair {pair_address}")
+                    logger.warning(f"⚠️  Failed to analyze pair {pair_address} on {chain}")
 
                 # Small delay between analyses
                 await asyncio.sleep(1)
 
-            # Update last block to current (we'll scan the next 10 blocks from here)
+            # Update last block — Base
             current_block = w3.eth.block_number
             if current_block > last_block + 10:
-                last_block = last_block + 10  # Move forward by 10 blocks
+                last_block = last_block + 10
             else:
-                last_block = current_block  # Caught up, use current block
+                last_block = current_block
+            
+            # Update last block — Monad
+            if w3_monad and last_block_monad is not None:
+                try:
+                    monad_current = w3_monad.eth.block_number
+                    if monad_current > last_block_monad + 50:
+                        last_block_monad = last_block_monad + 50
+                    else:
+                        last_block_monad = monad_current
+                except:
+                    pass
 
-            # Wait before next scan (10 seconds - faster since we're scanning smaller ranges)
+            # Wait before next scan
             await asyncio.sleep(10)
 
         except Exception as e:
             logger.error(f"Error in scan loop: {e}")
             import traceback
             traceback.print_exc()
-            await asyncio.sleep(60)  # Wait longer on error
+            await asyncio.sleep(60)
 
 # ===== AUTO GROUP DETECTION HANDLERS =====
 
@@ -3774,6 +3947,8 @@ async def main():
             BotCommand("alerts", "Toggle alerts on/off"),
             BotCommand("buy", "Buy token"),
             BotCommand("checktoken", "Check a token"),
+            BotCommand("advertise", "Advertise your project"),
+            BotCommand("earnings", "View referral earnings"),
             BotCommand("admin", "Admin panel")
         ]
         # Register for all scopes: default, private, and groups
