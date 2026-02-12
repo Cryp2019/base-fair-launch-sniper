@@ -2148,6 +2148,44 @@ async def alerts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /alerts command to toggle alerts on/off"""
+    if is_group_chat(update):
+        await update.message.reply_text("⚠️ Use this command in DM with the bot.")
+        return
+    
+    user = update.effective_user
+    # Ensure user exists in DB
+    db.add_user(user.id, user.username, user.first_name)
+    
+    new_state = db.toggle_alerts(user.id)
+    
+    status_emoji = "✅" if new_state else "❌"
+    status_text = "ON" if new_state else "OFF"
+    
+    msg = (
+        f"🔔 *Alerts Toggled*\n\n"
+        f"Status: {status_emoji} *{status_text}*\n\n"
+    )
+    
+    if new_state:
+        msg += (
+            "You will now receive:\n"
+            "▸ Instant alerts for new token launches\n"
+            "▸ Security scores & market data\n"
+            "▸ On-chain analytics\n\n"
+            "Type /alerts again to turn off."
+        )
+    else:
+        msg += (
+            "You will *not* receive launch alerts.\n\n"
+            "▸ Manual token checks still work\n"
+            "▸ Type /alerts again to turn on."
+        )
+    
+    keyboard = [[InlineKeyboardButton(f"{'🔕 Disable' if new_state else '🔔 Enable'} Alerts", callback_data="alerts")]]
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show upgrade info with payment instructions"""
     query = update.callback_query
@@ -3733,6 +3771,7 @@ async def main():
         commands = [
             BotCommand("start", "Show main menu"),
             BotCommand("menu", "Open menu"),
+            BotCommand("alerts", "Toggle alerts on/off"),
             BotCommand("buy", "Buy token"),
             BotCommand("checktoken", "Check a token"),
             BotCommand("admin", "Admin panel")
@@ -3769,6 +3808,7 @@ async def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("register_commands", register_commands_admin))
     app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("alerts", alerts_command))
     app.add_handler(CommandHandler("earnings", earnings_command))
     app.add_handler(CommandHandler("advertise", advertise_command))
     app.add_handler(CommandHandler("admin", admin_panel))
