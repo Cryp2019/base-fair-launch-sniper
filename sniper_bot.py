@@ -3677,12 +3677,12 @@ def _build_admin_panel_message():
     monad_block = "N/A"
     try:
         base_block = f"{w3.eth.block_number:,}"
-    except:
+    except Exception:
         pass
     if w3_monad:
         try:
             monad_block = f"{w3_monad.eth.block_number:,}"
-        except:
+        except Exception:
             pass
     
     # Group info
@@ -3855,8 +3855,9 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=uid, text=f"📢 *Announcement*\n\n{broadcast_text}", parse_mode='Markdown')
                 sent_count += 1
-            except Exception:
+            except Exception as e:
                 fail_count += 1
+                logger.debug(f"Failed to send broadcast to user {uid}: {e}")
         
         await update.message.reply_text(
             f"✅ Broadcast sent!\n\n"
@@ -3906,13 +3907,13 @@ async def admin_cleanup_now_callback(update: Update, context: ContextTypes.DEFAU
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
                 deleted_count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Manual cleanup failed to delete msg {message_id} from {chat_id}: {e}")
             
             try:
                 db.remove_scheduled_deletion(chat_id, message_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to remove scheduled deletion for msg {message_id}: {e}")
     
     msg = (
         f"🧹 *CLEANUP COMPLETE*\n\n"
