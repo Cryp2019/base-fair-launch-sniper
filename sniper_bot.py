@@ -178,16 +178,31 @@ else:
 # Monad Web3 connection
 w3_monad = None
 if MONAD_ENABLED:
-    try:
-        w3_monad = Web3(Web3.HTTPProvider(MONAD_RPC))
-        if w3_monad.is_connected():
-            logger.info(f"✅ Connected to Monad RPC")
-        else:
-            logger.warning(f"⚠️ Failed to connect to Monad RPC - Monad scanning disabled")
-            w3_monad = None
-    except Exception as e:
-        logger.warning(f"⚠️ Monad connection failed: {e}")
-        w3_monad = None
+    # List of RPCs to try (env var first, then public backups)
+    monad_rpcs = [MONAD_RPC] + [
+        'https://monad-mainnet.api.onfinality.io/public',
+        'https://rpc-mainnet.monadinfra.com',
+        'https://api-monad-mainnet-full.n.dwellir.com/d8d3c1c5-c22e-40f3-8407-50fa0e01eef9',
+        'https://rpc.monad.xyz' 
+    ]
+    
+    # Remove duplicates
+    monad_rpcs = list(dict.fromkeys(monad_rpcs))
+    
+    for rpc in monad_rpcs:
+        try:
+            logger.info(f"🟣 Connecting to Monad RPC: {rpc}...")
+            temp_w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 5}))
+            if temp_w3.is_connected():
+                w3_monad = temp_w3
+                chain_id = w3_monad.eth.chain_id
+                logger.info(f"✅ Connected to Monad RPC! (Chain ID: {chain_id})")
+                break
+        except Exception as e:
+            logger.warning(f"⚠️ Monad connection failed for {rpc}: {e}")
+            
+    if not w3_monad:
+        logger.warning(f"⚠️ Failed to connect to any Monad RPC - Monad scanning disabled")
 else:
     logger.info("ℹ️ Monad chain scanning disabled")
     
