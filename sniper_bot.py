@@ -879,14 +879,51 @@ _group_post_cooldown_until = 0  # timestamp when cooldown ends
 # Track background tasks to prevent garbage collection
 _background_tasks = set()
 
-async def _auto_delete_message(app: Application, chat_id: int, message_id: int, delay: int = 300):
+async def _auto_delete_message(app: Application, chat_id: int, message_id: int, delay: int = 300, scheduled_time: int = 0):
     """Delete a message after delay seconds (default 5 minutes)"""
     try:
-        await asyncio.sleep(delay)
+        # If scheduled_time is provided, calculate remaining delay
+        if scheduled_time > 0:
+            now = int(time.time())
+            delay = max(0, scheduled_time - now)
+        
+        if delay > 0:
+            await asyncio.sleep(delay)
+            
         await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"🗑️ Auto-deleted message {message_id} from group {chat_id}")
+        
+        # Remove from DB
+        db.remove_scheduled_deletion(chat_id, message_id)
+        
     except Exception as e:
         logger.warning(f"Could not auto-delete message {message_id}: {e}")
+        # Even if failed, remove from DB if message not found or other permanent error
+        if "Message to delete not found" in str(e) or "Chat not found" in str(e):
+             db.remove_scheduled_deletion(chat_id, message_id)
+
+async def restore_pending_deletions(app: Application):
+    """Restore pending auto-delete tasks from DB on startup"""
+    try:
+        pending = db.get_pending_deletions()
+        count = 0
+        now = int(time.time())
+        
+        for item in pending:
+            chat_id = item['chat_id']
+            message_id = item['message_id']
+            delete_at = item['delete_at']
+            
+            # Schedule deletion
+            task = asyncio.create_task(_auto_delete_message(app, chat_id, message_id, scheduled_time=delete_at))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+            count += 1
+            
+        if count > 0:
+            logger.info(f"♻️ Restored {count} pending auto-delete tasks from database")
+    except Exception as e:
+        logger.error(f"Failed to restore pending deletions: {e}")
 
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
     """Post ALL projects to groups - formats messages directly (no external dependencies)"""
@@ -1061,7 +1098,13 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
                 
                 # Schedule auto-delete after 4 minutes (skip for sponsored)
                 if not is_sponsored:
-                    task = asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=240))
+                    delay = 240
+                    delete_at = int(time.time()) + delay
+                    
+                    # Persist to DB first
+                    db.add_scheduled_deletion(group['group_id'], sent_msg.message_id, delete_at)
+                    
+                    task = asyncio.create_task(_auto_delete_message(app, group['group_id'], sent_msg.message_id, delay=delay))
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
                     logger.info(f"⏰ Auto-delete scheduled in 4 min for msg {sent_msg.message_id}")
@@ -3964,6 +4007,9 @@ async def main():
         logger.info("✅ Command menu button enabled")
     except Exception as e:
         logger.warning(f"⚠️ Could not set menu button: {e}")
+
+    # Restore pending deletions
+    await restore_pending_deletions(app)
 
     # Initialize sponsored projects tracking (if available)
     sponsored_projects = None

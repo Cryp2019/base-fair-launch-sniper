@@ -142,6 +142,17 @@ class UserDatabase:
                     FOREIGN KEY (referred_user_id) REFERENCES users(user_id)
                 )
             ''')
+
+            # Auto-delete messages table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS message_deletions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    delete_at INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             # Add commission_start_date column to users table if it doesn't exist
             try:
@@ -703,3 +714,32 @@ class UserDatabase:
         except Exception as e:
             logger.error(f"Failed to update group: {e}")
     
+
+    def add_scheduled_deletion(self, chat_id: int, message_id: int, delete_at: int):
+        """Add a message to be auto-deleted"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO message_deletions (chat_id, message_id, delete_at)
+            VALUES (?, ?, ?)
+        ''', (chat_id, message_id, delete_at))
+        conn.commit()
+        conn.close()
+
+    def remove_scheduled_deletion(self, chat_id: int, message_id: int):
+        """Remove a scheduled deletion (after successful delete)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM message_deletions WHERE chat_id = ? AND message_id = ?', (chat_id, message_id))
+        conn.commit()
+        conn.close()
+
+    def get_pending_deletions(self) -> List[Dict]:
+        """Get all pending message deletions"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM message_deletions')
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
