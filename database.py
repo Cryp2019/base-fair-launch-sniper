@@ -68,6 +68,10 @@ class UserDatabase:
         
         self.init_database()
     
+    def get_connection(self):
+        """Get a new database connection"""
+        return sqlite3.connect(self.db_path)
+    
     def init_database(self):
         """Initialize database tables"""
         try:
@@ -352,6 +356,10 @@ class UserDatabase:
         cursor.execute('UPDATE users SET tier = ? WHERE user_id = ?', (tier, user_id))
         conn.commit()
         conn.close()
+    
+    def upgrade_to_premium(self, user_id: int):
+        """Upgrade a user to premium tier"""
+        self.update_tier(user_id, 'premium')
 
     def create_wallet(self, user_id: int, wallet_address: str, private_key: str) -> Dict:
         """Create a new wallet for a user with encrypted private key"""
