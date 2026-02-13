@@ -178,12 +178,16 @@ else:
 # Monad Web3 connection
 w3_monad = None
 if MONAD_ENABLED:
-    # List of RPCs to try (env var first, then public backups)
+    # List of RPCs to try (env var first, then public backups with higher rate limits)
+    # Priority: Goldsky (300rps) -> Ankr (300rps) -> Alchemy (15rps) -> Official -> Others
     monad_rpcs = [MONAD_RPC] + [
+        'https://rpc2.monad.xyz', # Goldsky (300rps, archival)
+        'https://rpc3.monad.xyz', # Ankr (300rps)
+        'https://rpc1.monad.xyz', # Alchemy (15rps)
         'https://monad-mainnet.api.onfinality.io/public',
         'https://rpc-mainnet.monadinfra.com',
         'https://api-monad-mainnet-full.n.dwellir.com/d8d3c1c5-c22e-40f3-8407-50fa0e01eef9',
-        'https://rpc.monad.xyz' 
+        'https://rpc.monad.xyz'   # QuickNode (25rps)
     ]
     
     # Remove duplicates
