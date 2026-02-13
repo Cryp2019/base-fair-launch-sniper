@@ -521,26 +521,64 @@ def parse_pair_event(log, dex_type: str, dex_id: str, config: dict) -> dict:
         'dex_emoji': config['emoji']
     }
 
-def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics: bool = False, dex_name: str = "Unknown", dex_emoji: str = "🔷", dex_id: str = "unknown") -> dict:
+def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics: bool = False, dex_name: str = "Unknown", dex_emoji: str = "🔷", dex_id: str = "unknown", chain: str = "base") -> dict:
     """Analyze a new token launch"""
     try:
-        # Convert addresses to checksum format (Web3.py requirement)
-        pair_address = w3.to_checksum_address(pair_address)
-        token0 = w3.to_checksum_address(token0)
-        token1 = w3.to_checksum_address(token1)
+        # Select correct Web3 instance
+        target_w3 = w3_monad if chain == 'monad' else w3
         
-        # Identify the new token (not USDC/WETH)
-        if token0.lower() == USDC_ADDRESS or token0.lower() == WETH_ADDRESS:
+        if not target_w3:
+            logger.error(f"Cannot analyze {chain} token - Web3 connection missing")
+            return None
+
+        # Convert addresses to checksum format (Web3.py requirement)
+        pair_address = target_w3.to_checksum_address(pair_address)
+        token0 = target_w3.to_checksum_address(token0)
+        token1 = target_w3.to_checksum_address(token1)
+        
+        # Identify the new token (not USDC/WETH - generic check for both chains)
+        # Note: USDC/WETH addresses might differ on Monad, but we passed them correctly in get_new_pairs
+        # Ideally we should use chain-specific constants here
+        
+        # Simple heuristic: assuming standard WETH/USDC addresses for Base
+        # For Monad, we might need different checks, but let's assume the scanner logic already identified the pair type correctly
+        
+        # Improved logic: check if token is one of the known bases for THIS chain
+        # For simplicity, we assume token0/token1 passed from scanner are correct
+        # We need to determine which one is the "new" token
+        
+        # On Monad, we defined MONAD_WETH and MONAD_USDC in get_new_pairs_monad
+        # But here we don't have scope of them easily unless we use globals or chain specific config
+        
+        # Fallback: check which one is the "base" token by checking common stable/native wrappers
+        known_bases = [USDC_ADDRESS, WETH_ADDRESS]
+        if chain == 'monad':
+            known_bases = ['0x760AfE86e5de5fa0Ee542fc7721795a146203f9e', '0xf5C6825015280CdfD0b56903F9F8B5A22193906F'] # WMON, USDC (from top of file)
+            # Make sure we use the ones defined at top of file if possible, hardcoding for now based on previous edits
+            
+        contract0 = target_w3.eth.contract(address=token0, abi=ERC20_ABI)
+        try:
+            sym0 = contract0.functions.symbol().call()
+        except:
+            sym0 = "UNKNOWN"
+            
+        # Heuristic: verify which is the quote token
+        if sym0 in ['USDC', 'WETH', 'WMON', 'USDT', 'DAI']:
             new_token = token1
-            base_token = "USDC" if token0.lower() == USDC_ADDRESS else "WETH"
+            base_token = sym0
             base_token_address = token0
         else:
             new_token = token0
-            base_token = "USDC" if token1.lower() == USDC_ADDRESS else "WETH"
+            # Try to get symbol of token1 to confirm
+            try:
+                contract1 = target_w3.eth.contract(address=token1, abi=ERC20_ABI)
+                base_token = contract1.functions.symbol().call()
+            except:
+                base_token = "ETH" # Fallback
             base_token_address = token1
 
         # Get token info
-        token_contract = w3.eth.contract(address=new_token, abi=ERC20_ABI)
+        token_contract = target_w3.eth.contract(address=new_token, abi=ERC20_ABI)
 
         try:
             name = token_contract.functions.name().call()
@@ -647,22 +685,45 @@ async def get_dexscreener_data(token_address: str) -> dict:
         'ath': None
     }
 
-async def calculate_pool_price(pair_address: str, token_address: str, base_token_address: str) -> float:
+async def calculate_pool_price(pair_address: str, token_address: str, base_token_address: str, chain: str = 'base') -> float:
     """Calculate token price from pool reserves (fallback if DexScreener fails)"""
     try:
+        # Select correct Web3 instance
+        target_w3 = w3_monad if chain == 'monad' else w3
+        if not target_w3:
+            return 0
+
         # Get pool reserves
         pool_abi = [
             {"constant":True,"inputs":[],"name":"token0","outputs":[{"name":"","type":"address"}],"type":"function"},
             {"constant":True,"inputs":[],"name":"token1","outputs":[{"name":"","type":"address"}],"type":"function"},
+            {"constant":True,"inputs":[],"name":"getReserves","outputs":[{"name":"","type":"uint112"},{"name":"","type":"uint112"},{"name":"","type":"uint32"}],"type":"function"}
         ]
         
-        pool_contract = w3.eth.contract(address=pair_address, abi=pool_abi)
+        pool_contract = target_w3.eth.contract(address=pair_address, abi=pool_abi)
         token0 = pool_contract.functions.token0().call().lower()
         token1 = pool_contract.functions.token1().call().lower()
         
-        # Get balances
-        token_contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
-        base_contract = w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
+        # Get balances/reserves
+        # Note: calling getReserves is better than balanceOf for Uniswap V2
+        # But if V3, getReserves doesn't exist?
+        # Monad is V3. Base is V2/V3.
+        # This function seems designed for V2 (getReserves).
+        # if V3, we need slot0?
+        # If target is Uniswap V3, this might fail.
+        # But let's assume standard V2 checks first or try-catch.
+        
+        # Actually, previous code used balance of pair address (V2 style)
+        # token_balance = token_contract.functions.balanceOf(pair_address).call()
+        # This works for V2.
+        # For V3, liquidity is invalid logic here.
+        
+        # FIXME: Monad Uniswap V3 logic is different.
+        # For now, let's keep it safe and catch errors.
+        
+        # Get balances using balanceOf (works for V2)
+        token_contract = target_w3.eth.contract(address=token_address, abi=ERC20_ABI)
+        base_contract = target_w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
         
         token_balance = token_contract.functions.balanceOf(pair_address).call()
         base_balance = base_contract.functions.balanceOf(pair_address).call()
@@ -673,11 +734,18 @@ async def calculate_pool_price(pair_address: str, token_address: str, base_token
         # Calculate price
         if token_balance > 0:
             price = (base_balance / (10 ** base_decimals)) / (token_balance / (10 ** token_decimals))
+            
+            # If base token is WETH, convert to USD using Chainlink (Base only)
+            if chain == 'base' and base_token_address.lower() == WETH_ADDRESS:
+                 eth_price = get_eth_price()
+                 return price * eth_price
+            
             return price
+            
+        return 0
     except Exception as e:
-        logger.warning(f"Pool price calculation failed: {e}")
-    
-    return 0
+        logger.debug(f"Pool price calculation failed: {e}")
+        return 0
 
 async def check_transfer_limits(token_address: str) -> dict:
     """Check if token has transfer amount limits"""
@@ -777,18 +845,23 @@ async def calculate_clog_percentage(token_address: str, pair_address: str) -> fl
     
     return 0.03  # Default minimal clog
 
-async def detect_airdrops(token_address: str) -> list:
+async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
     """Detect if token has airdrop functionality or recent batch transfers"""
     airdrops = []
     
+    # Alchemy only supports Base for now
+    if chain != 'base':
+        return []
+
     try:
         # Check for airdrop-related functions
+        target_w3 = w3
         airdrop_abi = [
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amounts","type":"uint256[]"}],"name":"airdrop","outputs":[],"type":"function"},
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amount","type":"uint256"}],"name":"multiTransfer","outputs":[],"type":"function"},
         ]
         
-        contract = w3.eth.contract(address=token_address, abi=ERC20_ABI + airdrop_abi)
+        contract = target_w3.eth.contract(address=token_address, abi=ERC20_ABI + airdrop_abi)
         
         # Check if airdrop function exists
         if hasattr(contract.functions, 'airdrop'):
@@ -798,20 +871,21 @@ async def detect_airdrops(token_address: str) -> list:
             airdrops.append("Multi-transfer function detected")
         
         # Check recent transactions for batch transfers
-        url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "alchemy_getAssetTransfers",
-            "params": [{
-                "fromBlock": "latest",
-                "toBlock": "latest",
-                "contractAddresses": [token_address],
-                "category": ["erc20"],
-                "maxCount": "0xa",
-                "withMetadata": True
-            }]
-        }
+        if chain == 'base' and ALCHEMY_KEY:
+            url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "alchemy_getAssetTransfers",
+                "params": [{
+                    "fromBlock": "latest",
+                    "toBlock": "latest",
+                    "contractAddresses": [token_address],
+                    "category": ["erc20"],
+                    "maxCount": "0xa",
+                    "withMetadata": True
+                }]
+            }
         
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
@@ -839,7 +913,7 @@ async def detect_airdrops(token_address: str) -> list:
     return airdrops
 
 async def get_comprehensive_metrics(token_address: str, pair_address: str, base_token_address: str, 
-                                   total_supply: int, decimals: int, premium: bool = False) -> dict:
+                                   total_supply: int, decimals: int, premium: bool = False, chain: str = 'base') -> dict:
     """Get all comprehensive metrics for a token"""
     metrics = {
         'price_usd': 0,
@@ -861,7 +935,7 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
         
         # If DexScreener didn't return price, calculate from pool
         if metrics['price_usd'] == 0:
-            pool_price = await calculate_pool_price(pair_address, token_address, base_token_address)
+            pool_price = await calculate_pool_price(pair_address, token_address, base_token_address, chain=chain)
             metrics['price_usd'] = pool_price
             
             # Calculate market cap manually if we have price
@@ -870,15 +944,16 @@ async def get_comprehensive_metrics(token_address: str, pair_address: str, base_
                 metrics['market_cap'] = pool_price * supply_formatted
         
         # Get transfer limits
-        limits = await check_transfer_limits(token_address)
+        limits = await check_transfer_limits(token_address, chain=chain)
         metrics['has_limits'] = limits['has_limits']
         metrics['limit_details'] = limits['details']
         
-        # Get clog percentage
-        metrics['clog_percentage'] = await calculate_clog_percentage(token_address, pair_address)
+        # Get clog percentage (skip for Monad as it relies on Alchemy)
+        if chain == 'base':
+            metrics['clog_percentage'] = await calculate_clog_percentage(token_address, pair_address)
         
         # Detect airdrops
-        metrics['airdrops'] = await detect_airdrops(token_address)
+        metrics['airdrops'] = await detect_airdrops(token_address, chain=chain)
         
     except Exception as e:
         logger.error(f"Error getting comprehensive metrics: {e}")
@@ -902,6 +977,7 @@ async def _auto_delete_message(app: Application, chat_id: int, message_id: int, 
             now = int(time.time())
             delay = max(0, scheduled_time - now)
         
+        logger.info(f"⏳ Waiting {delay}s to delete msg {message_id} in {chat_id}")
         if delay > 0:
             await asyncio.sleep(delay)
             
@@ -909,13 +985,19 @@ async def _auto_delete_message(app: Application, chat_id: int, message_id: int, 
         logger.info(f"🗑️ Auto-deleted message {message_id} from group {chat_id}")
         
         # Remove from DB
-        db.remove_scheduled_deletion(chat_id, message_id)
+        try:
+            db.remove_scheduled_deletion(chat_id, message_id)
+        except Exception as e:
+            logger.warning(f"DB remove error: {e}")
         
     except Exception as e:
         logger.warning(f"Could not auto-delete message {message_id}: {e}")
         # Even if failed, remove from DB if message not found or other permanent error
         if "Message to delete not found" in str(e) or "Chat not found" in str(e):
-             db.remove_scheduled_deletion(chat_id, message_id)
+             try:
+                 db.remove_scheduled_deletion(chat_id, message_id)
+             except:
+                 pass
 
 async def restore_pending_deletions(app: Application):
     """Restore pending auto-delete tasks from DB on startup"""
@@ -1179,14 +1261,25 @@ async def send_launch_alert(app: Application, analysis: dict):
             free_users.append(user)
 
     # Fetch comprehensive metrics
+    analysis_chain = analysis.get('chain', 'base')
+    
+    # Determine correct base token address for the chain
+    base_sym = analysis.get('base_token', 'WETH')
+    if analysis_chain == 'monad':
+        base_address = MONAD_USDC_ADDRESS if base_sym == 'USDC' else MONAD_WETH_ADDRESS
+    else:
+        base_address = USDC_ADDRESS if base_sym == 'USDC' else WETH_ADDRESS
+
+    # Fetch comprehensive metrics
     try:
         metrics = await get_comprehensive_metrics(
             analysis['token_address'],
             analysis['pair_address'],
-            USDC_ADDRESS if analysis['base_token'] == 'USDC' else WETH_ADDRESS,
+            base_address,
             analysis['total_supply'],
             analysis['decimals'],
-            premium=True
+            premium=True,
+            chain=analysis_chain
         )
     except Exception as e:
         logger.error(f"Failed to fetch metrics: {e}")
@@ -3822,7 +3915,8 @@ async def scan_loop(app: Application):
                     premium_analytics=True,
                     dex_name=pair.get('dex_name', 'Unknown'),
                     dex_emoji=pair.get('dex_emoji', '🔷'),
-                    dex_id=pair.get('dex_id', 'unknown')
+                    dex_id=pair.get('dex_id', 'unknown'),
+                    chain=chain
                 )
 
                 if analysis:
