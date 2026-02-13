@@ -1079,6 +1079,7 @@ async def cleanup_old_group_posts(app: Application):
         except Exception as e:
             logger.error(f"Error in cleanup task: {e}")
             await asyncio.sleep(60)  # Wait before retry on error
+
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
     """Post ALL projects to groups - formats messages directly (no external dependencies)"""
     global _group_post_count, _group_post_cooldown_until
