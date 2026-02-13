@@ -158,7 +158,7 @@ class AutomatedSponsorshipProcessor:
             scanner = SecurityScanner(w3)
             
             # Get security rating
-            rating = scanner.get_project_rating(token_address)
+            rating = scanner.scan_token(token_address)
             
             # Check each requirement
             issues = []

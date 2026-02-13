@@ -24,6 +24,18 @@ import html
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# DEBUG: List files to diagnose Railway volume/mount issues
+try:
+    logger.info(f"📂 Current Working Directory: {os.getcwd()}")
+    logger.info(f"📂 Files in CWD: {os.listdir('.')}")
+    logger.info(f"📂 Sys Path: {sys.path}")
+except Exception as e:
+    logger.error(f"Failed to list directory: {e}")
+
+# Ensure CWD is in path
+if os.getcwd() not in sys.path:
+    sys.path.append(os.getcwd())
+
 # Try to import sponsorship modules (optional for premium features)
 try:
     from project_sponsors import SponsoredProjects

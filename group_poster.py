@@ -136,7 +136,7 @@ class GroupPoster:
             if not contract_address:
                 return False, {}
             
-            rating = self.scanner.get_project_rating(contract_address)
+            rating = self.scanner.scan_token(contract_address)
             
             # Only post if rating score is 75 or higher
             if rating.get('score', 0) >= self.min_rating_score:
