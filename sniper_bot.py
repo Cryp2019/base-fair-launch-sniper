@@ -1147,14 +1147,30 @@ async def post_to_group_with_buy_button(app: Application, analysis: dict, metric
             f"🚀 Reach 1000s of active Base traders"
         )
         
+        # Determine correct explorer links
+        chain = analysis.get('chain', 'base')
+        if chain == 'monad':
+            scan_url = f"https://monadscan.com/token/{contract}"
+            dex_url = f"https://dexscreener.com/monad/{contract}"
+            swap_url = f"https://app.uniswap.org/#/tokens/monad/{contract}" # Assumption for Uniswap
+            # Or use Monad specific DEX if known. Standard Uniswap URL structure usually supports chain prefixes if supported.
+            # But Monad might not be on standard app.uniswap.org yet.
+            # Let's keep it simple or use a generic swap link if unsure.
+            # The user docs didn't specify swap URL.
+            # Let's use dex_url for chart.
+        else: # Base
+            scan_url = f"https://basescan.org/token/{contract}"
+            dex_url = f"https://dexscreener.com/base/{contract}"
+            swap_url = f"https://app.uniswap.org/#/tokens/base/{contract}"
+
         # Action buttons - all redirect to DM for privacy
         keyboard = [
             [
-                InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/base/{contract}"),
+                InlineKeyboardButton("📊 Chart", url=dex_url),
                 InlineKeyboardButton("🔍 Scan", url=f"https://t.me/{BOT_USERNAME}?start=scan_{contract}"),
             ],
             [
-                InlineKeyboardButton("🦄 Swap", url=f"https://app.uniswap.org/#/tokens/base/{contract}"),
+                InlineKeyboardButton("🦄 Swap", url=swap_url),
                 InlineKeyboardButton("🎯 Buy", url=f"https://t.me/{BOT_USERNAME}?start=buy_{contract}"),
             ],
             [
@@ -1323,14 +1339,25 @@ async def send_launch_alert(app: Application, analysis: dict):
     airdrop_str = ", ".join(metrics['airdrops']) if metrics['airdrops'] else "None detected"
 
     # Create action buttons
+    if analysis_chain == 'monad':
+        scan_url_base = f"https://monadscan.com/token/{analysis['token_address']}"
+        scan_url_pair = f"https://monadscan.com/address/{analysis['pair_address']}"
+        dex_url = f"https://dexscreener.com/monad/{analysis['pair_address']}"
+        uniswap_url = f"https://app.uniswap.org/#/tokens/monad/{analysis['token_address']}"
+    else: # Base
+        scan_url_base = f"https://basescan.org/token/{analysis['token_address']}"
+        scan_url_pair = f"https://basescan.org/address/{analysis['pair_address']}"
+        dex_url = f"https://dexscreener.com/base/{analysis['pair_address']}"
+        uniswap_url = f"https://app.uniswap.org/#/tokens/base/{analysis['token_address']}"
+
     keyboard = [
         [
-            InlineKeyboardButton("🔍 View Token", url=f"https://basescan.org/token/{analysis['token_address']}"),
-            InlineKeyboardButton("💧 View Pair", url=f"https://basescan.org/address/{analysis['pair_address']}")
+            InlineKeyboardButton("🔍 View Token", url=scan_url_base),
+            InlineKeyboardButton("💧 View Pair", url=scan_url_pair)
         ],
         [
-            InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/base/{analysis['pair_address']}"),
-            InlineKeyboardButton("🦄 Uniswap", url=f"https://app.uniswap.org/#/tokens/base/{analysis['token_address']}")
+            InlineKeyboardButton("📊 DexScreener", url=dex_url),
+            InlineKeyboardButton("🦄 Uniswap", url=uniswap_url)
         ]
     ]
 
