@@ -33,9 +33,12 @@ except FileNotFoundError:
 
 # ===== CONFIG =====
 _alchemy_key = os.getenv('ALCHEMY_BASE_KEY', '')
+_infura_key = os.getenv('INFURA_KEY', '')
 _base_rpc_url = os.getenv('BASE_RPC_URL', '')
 if _base_rpc_url:
     BASE_RPC = _base_rpc_url
+elif _infura_key:
+    BASE_RPC = f"https://base-mainnet.infura.io/v3/{_infura_key}"
 elif _alchemy_key:
     BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{_alchemy_key}"
 else:
@@ -578,7 +581,7 @@ async def scan_command(update: Update, context: CallbackContext):
 async def main():
     # Debug: Print loaded env vars
     logging.info(f"Telegram Token loaded: {'Yes' if TELEGRAM_TOKEN else 'No'}")
-    logging.info(f"RPC Provider: {'Alchemy' if os.getenv('ALCHEMY_BASE_KEY') else 'Free public RPC'}")
+    logging.info(f"RPC Provider: {'Infura' if os.getenv('INFURA_KEY') else 'Alchemy' if os.getenv('ALCHEMY_BASE_KEY') else 'Free public RPC'}")
     
     # Scan-only mode (for GitHub Actions)
     if '--scan-only' in sys.argv:

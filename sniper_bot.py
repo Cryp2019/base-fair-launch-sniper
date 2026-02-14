@@ -78,10 +78,13 @@ if os.path.exists('.env'):
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
-# Use custom RPC URL, or Alchemy if key provided, or free public RPCs as fallback
+INFURA_KEY = os.getenv('INFURA_KEY', '')  # Infura (cheaper alternative to Alchemy)
+# Use custom RPC URL, or Infura/Alchemy if key provided, or free public RPCs as fallback
 _base_rpc_url = os.getenv('BASE_RPC_URL', '')
 if _base_rpc_url:
     BASE_RPC = _base_rpc_url
+elif INFURA_KEY:
+    BASE_RPC = f"https://base-mainnet.infura.io/v3/{INFURA_KEY}"
 elif ALCHEMY_KEY:
     BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
 else:
@@ -191,6 +194,8 @@ def _mask_rpc_url(url):
     """Mask API keys in RPC URLs for safe logging"""
     if ALCHEMY_KEY and len(ALCHEMY_KEY) > 8 and ALCHEMY_KEY in url:
         return url.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
+    if INFURA_KEY and len(INFURA_KEY) > 8 and INFURA_KEY in url:
+        return url.replace(INFURA_KEY, INFURA_KEY[:4] + '...' + INFURA_KEY[-4:])
     return url
 
 # Initialize
@@ -4129,9 +4134,9 @@ async def main():
         logger.error("❌ Missing TELEGRAM_BOT_TOKEN! Set it in Railway environment variables.")
         sys.exit(1)
 
-    if not ALCHEMY_KEY:
-        logger.warning("⚠️ ALCHEMY_BASE_KEY not set — using free public RPCs (may have rate limits)")
-        logger.warning("   For best performance, set ALCHEMY_BASE_KEY or BASE_RPC_URL")
+    if not ALCHEMY_KEY and not INFURA_KEY and not _base_rpc_url:
+        logger.warning("⚠️ No RPC key set — using free public RPCs (may have rate limits)")
+        logger.warning("   For best performance, set INFURA_KEY, ALCHEMY_BASE_KEY, or BASE_RPC_URL")
 
     logger.info("╔═══════════════════════════════════╗")
     logger.info("   🚀 BASE FAIR LAUNCH SNIPER BOT")
