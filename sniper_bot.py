@@ -569,8 +569,7 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         # Fallback: check which one is the "base" token by checking common stable/native wrappers
         known_bases = [USDC_ADDRESS, WETH_ADDRESS]
         if chain == 'monad':
-            known_bases = ['0x760AfE86e5de5fa0Ee542fc7721795a146203f9e', '0xf5C6825015280CdfD0b56903F9F8B5A22193906F'] # WMON, USDC (from top of file)
-            # Make sure we use the ones defined at top of file if possible, hardcoding for now based on previous edits
+            known_bases = [MONAD_WETH_ADDRESS, MONAD_USDC_ADDRESS]
             
         contract0 = target_w3.eth.contract(address=token0, abi=ERC20_ABI)
         try:
@@ -763,9 +762,14 @@ async def calculate_pool_price(pair_address: str, token_address: str, base_token
         logger.debug(f"Pool price calculation failed: {e}")
         return 0
 
-async def check_transfer_limits(token_address: str) -> dict:
+async def check_transfer_limits(token_address: str, chain: str = 'base') -> dict:
     """Check if token has transfer amount limits"""
     try:
+        # Select correct Web3 instance
+        target_w3 = w3_monad if chain == 'monad' else w3
+        if not target_w3:
+            return {'has_limits': False, 'details': 'No limits'}
+
         # Check for common limit functions
         limit_abi = [
             {"constant":True,"inputs":[],"name":"_maxTxAmount","outputs":[{"name":"","type":"uint256"}],"type":"function"},
@@ -773,7 +777,7 @@ async def check_transfer_limits(token_address: str) -> dict:
             {"constant":True,"inputs":[],"name":"_maxWalletSize","outputs":[{"name":"","type":"uint256"}],"type":"function"},
         ]
         
-        contract = w3.eth.contract(address=token_address, abi=ERC20_ABI + limit_abi)
+        contract = target_w3.eth.contract(address=token_address, abi=ERC20_ABI + limit_abi)
         
         # Try to get total supply for percentage calculation
         total_supply = contract.functions.totalSupply().call()
@@ -903,25 +907,25 @@ async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
                 }]
             }
         
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('result', {}).get('transfers', [])
-            
-            # Group by transaction hash
-            tx_groups = {}
-            for transfer in transfers:
-                tx_hash = transfer.get('hash')
-                if tx_hash:
-                    if tx_hash not in tx_groups:
-                        tx_groups[tx_hash] = 0
-                    tx_groups[tx_hash] += 1
-            
-            # If any transaction has 5+ transfers, it's likely an airdrop
-            for tx_hash, count in tx_groups.items():
-                if count >= 5:
-                    airdrops.append(f"Batch transfer detected ({count} recipients)")
-                    break
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                transfers = data.get('result', {}).get('transfers', [])
+                
+                # Group by transaction hash
+                tx_groups = {}
+                for transfer in transfers:
+                    tx_hash = transfer.get('hash')
+                    if tx_hash:
+                        if tx_hash not in tx_groups:
+                            tx_groups[tx_hash] = 0
+                        tx_groups[tx_hash] += 1
+                
+                # If any transaction has 5+ transfers, it's likely an airdrop
+                for tx_hash, count in tx_groups.items():
+                    if count >= 5:
+                        airdrops.append(f"Batch transfer detected ({count} recipients)")
+                        break
     
     except Exception as e:
         logger.debug(f"Airdrop detection failed: {e}")
@@ -1038,6 +1042,43 @@ async def restore_pending_deletions(app: Application):
     except Exception as e:
         logger.error(f"Failed to restore pending deletions: {e}")
 
+async def cleanup_old_group_posts(app: Application):
+    """Periodically delete old bot posts from all groups every 4 minutes"""
+    logger.info("🧹 Starting periodic group post cleanup task (every 4 minutes)")
+    while True:
+        try:
+            await asyncio.sleep(240)  # Wait 4 minutes between cleanup cycles
+            
+            pending = db.get_pending_deletions()
+            now = int(time.time())
+            deleted_count = 0
+            
+            for item in pending:
+                chat_id = item['chat_id']
+                message_id = item['message_id']
+                delete_at = item['delete_at']
+                
+                # Delete messages whose delete_at time has passed
+                if delete_at <= now:
+                    try:
+                        await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                        deleted_count += 1
+                        logger.info(f"🗑️ Cleanup deleted msg {message_id} from group {chat_id}")
+                    except Exception as e:
+                        logger.debug(f"Cleanup could not delete msg {message_id}: {e}")
+                    
+                    # Remove from DB regardless (message gone or error is permanent)
+                    try:
+                        db.remove_scheduled_deletion(chat_id, message_id)
+                    except Exception:
+                        pass
+            
+            if deleted_count > 0:
+                logger.info(f"🧹 Cleanup cycle: deleted {deleted_count} old posts from groups")
+                
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+            await asyncio.sleep(60)  # Wait before retry on error
 async def post_to_group_with_buy_button(app: Application, analysis: dict, metrics: dict):
     """Post ALL projects to groups - formats messages directly (no external dependencies)"""
     global _group_post_count, _group_post_cooldown_until
@@ -3625,16 +3666,29 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE, tok
 
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin panel (admin only)"""
-    user = update.effective_user
-
-    if not admin_manager.is_admin(user.id, user.username):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-
+def _build_admin_panel_message():
+    """Build admin panel message with stats, chain status, and group info"""
     stats = admin_manager.get_admin_stats()
-
+    
+    # Chain status
+    base_status = "✅ Connected" if w3.is_connected() else "❌ Offline"
+    monad_status = "✅ Connected" if w3_monad else "❌ Offline"
+    base_block = "N/A"
+    monad_block = "N/A"
+    try:
+        base_block = f"{w3.eth.block_number:,}"
+    except Exception:
+        pass
+    if w3_monad:
+        try:
+            monad_block = f"{w3_monad.eth.block_number:,}"
+        except Exception:
+            pass
+    
+    # Group info
+    all_groups = db.get_all_groups()
+    pending_deletions = db.get_pending_deletions()
+    
     msg = (
         f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
         f"┃                                                    ┃\n"
@@ -3650,6 +3704,17 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Total Referrals: *{stats.get('total_referrals', 0):,}*\n"
         f"Total Wallets: *{stats.get('total_wallets', 0):,}*\n\n"
         f"┌─────────────────────┐\n"
+        f"│  ⛓️ *CHAIN STATUS*    │\n"
+        f"└─────────────────────┘\n\n"
+        f"🔵 Base: {base_status} (Block: {base_block})\n"
+        f"🟣 Monad: {monad_status} (Block: {monad_block})\n\n"
+        f"┌─────────────────────┐\n"
+        f"│  📢 *GROUPS*         │\n"
+        f"└─────────────────────┘\n\n"
+        f"Active Groups: *{len(all_groups)}*\n"
+        f"Pending Deletions: *{len(pending_deletions)}*\n"
+        f"🧹 Auto-cleanup: Every 4 min\n\n"
+        f"┌─────────────────────┐\n"
         f"│  💰 *FEE SETTINGS*   │\n"
         f"└─────────────────────┘\n\n"
         f"Trading Fee: *{stats.get('current_fee_percentage', 0)}%*\n"
@@ -3661,7 +3726,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Fee Collection Wallet:\n`{stats.get('fee_wallet', 'Not set')}`\n\n"
         f"Use the buttons below to manage:"
     )
-
+    
     keyboard = [
         [
             InlineKeyboardButton("💳 Update Payment Address", callback_data="admin_update_payment"),
@@ -3672,11 +3737,26 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")
         ],
         [
+            InlineKeyboardButton("📢 List Groups", callback_data="admin_list_groups"),
+            InlineKeyboardButton("🧹 Cleanup Now", callback_data="admin_cleanup_now")
+        ],
+        [
             InlineKeyboardButton("📊 Refresh Stats", callback_data="admin_panel"),
             InlineKeyboardButton("« Back to Menu", callback_data="menu")
         ]
     ]
+    
+    return msg, keyboard
 
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel (admin only)"""
+    user = update.effective_user
+
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+
+    msg, keyboard = _build_admin_panel_message()
     await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3688,50 +3768,161 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("❌ Access denied. Admin only.", show_alert=True)
         return
 
-    stats = admin_manager.get_admin_stats()
+    msg, keyboard = _build_admin_panel_message()
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def admin_setpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /setpayment <address>"""
+    user = update.effective_user
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Usage: `/setpayment 0x...`", parse_mode='Markdown')
+        return
+    
+    result = admin_manager.update_payment_address(context.args[0])
+    if result['success']:
+        await update.message.reply_text(f"✅ {result['message']}\n\nNew address: `{result['address']}`", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(f"❌ {result['message']}")
+
+async def admin_setfee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /setfee <percentage>"""
+    user = update.effective_user
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Usage: `/setfee 0.5`", parse_mode='Markdown')
+        return
+    
+    try:
+        new_fee = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Usage: `/setfee 0.5`", parse_mode='Markdown')
+        return
+    
+    result = admin_manager.update_fee_percentage(new_fee)
+    if result['success']:
+        await update.message.reply_text(f"✅ {result['message']}")
+    else:
+        await update.message.reply_text(f"❌ {result['message']}")
+
+async def admin_grantpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /grantpremium <user_id>"""
+    user = update.effective_user
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Usage: `/grantpremium 123456789`", parse_mode='Markdown')
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Usage: `/grantpremium 123456789`", parse_mode='Markdown')
+        return
+    
+    result = admin_manager.grant_premium(target_user_id)
+    if result['success']:
+        await update.message.reply_text(f"✅ {result['message']}")
+    else:
+        await update.message.reply_text(f"❌ {result['message']}")
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /broadcast <message>"""
+    user = update.effective_user
+    if not admin_manager.is_admin(user.id, user.username):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: `/broadcast Your message here`", parse_mode='Markdown')
+        return
+    
+    broadcast_text = ' '.join(context.args)
+    result = admin_manager.broadcast_message(broadcast_text)
+    
+    if result['success']:
+        sent_count = 0
+        fail_count = 0
+        for uid in result['user_ids']:
+            try:
+                await context.bot.send_message(chat_id=uid, text=f"📢 *Announcement*\n\n{broadcast_text}", parse_mode='Markdown')
+                sent_count += 1
+            except Exception as e:
+                fail_count += 1
+                logger.debug(f"Failed to send broadcast to user {uid}: {e}")
+        
+        await update.message.reply_text(
+            f"✅ Broadcast sent!\n\n"
+            f"Delivered: *{sent_count}*\n"
+            f"Failed: *{fail_count}*\n"
+            f"Total: *{result['total_users']}*",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(f"❌ {result['message']}")
+
+async def admin_list_groups_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show list of groups the bot is in"""
+    query = update.callback_query
+    await query.answer()
+    
+    all_groups = db.get_all_groups()
+    
+    if not all_groups:
+        msg = "📢 *No groups registered*\n\nAdd the bot to a group to start auto-posting."
+    else:
+        msg = f"📢 *REGISTERED GROUPS* ({len(all_groups)})\n━━━━━━━━━━━━━━━━\n\n"
+        for i, group in enumerate(all_groups, 1):
+            title = group.get('group_title', 'Unknown')
+            gid = group['group_id']
+            enabled = "✅" if group.get('enabled', 1) else "❌"
+            msg += f"{i}. {enabled} *{title}*\n   ID: `{gid}`\n\n"
+    
+    keyboard = [[InlineKeyboardButton("« Back to Admin", callback_data="admin_panel")]]
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_cleanup_now_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger cleanup of old posts from all groups"""
+    query = update.callback_query
+    await query.answer("🧹 Running cleanup...")
+    
+    pending = db.get_pending_deletions()
+    now = int(time.time())
+    deleted_count = 0
+    
+    for item in pending:
+        chat_id = item['chat_id']
+        message_id = item['message_id']
+        delete_at = item['delete_at']
+        
+        if delete_at <= now:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                deleted_count += 1
+            except Exception as e:
+                logger.debug(f"Manual cleanup failed to delete msg {message_id} from {chat_id}: {e}")
+            
+            try:
+                db.remove_scheduled_deletion(chat_id, message_id)
+            except Exception as e:
+                logger.debug(f"Failed to remove scheduled deletion for msg {message_id}: {e}")
+    
     msg = (
-        f"┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        f"┃                                                    ┃\n"
-        f"┃      👑 *ADMIN PANEL*         ┃\n"
-        f"┃                                                    ┃\n"
-        f"┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  📊 *USER STATS*     │\n"
-        f"└─────────────────────┘\n\n"
-        f"Total Users: *{stats.get('total_users', 0):,}*\n"
-        f"Premium Users: *{stats.get('premium_users', 0):,}*\n"
-        f"Free Users: *{stats.get('free_users', 0):,}*\n"
-        f"Total Referrals: *{stats.get('total_referrals', 0):,}*\n"
-        f"Total Wallets: *{stats.get('total_wallets', 0):,}*\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  💰 *FEE SETTINGS*   │\n"
-        f"└─────────────────────┘\n\n"
-        f"Trading Fee: *{stats.get('current_fee_percentage', 0)}%*\n"
-        f"Fees Collected: *{stats.get('total_fees_collected', 0):.6f} ETH*\n\n"
-        f"┌─────────────────────┐\n"
-        f"│  💳 *WALLETS*        │\n"
-        f"└─────────────────────┘\n\n"
-        f"Payment Wallet:\n`{stats.get('payment_wallet', 'Not set')}`\n\n"
-        f"Fee Collection Wallet:\n`{stats.get('fee_wallet', 'Not set')}`\n\n"
-        f"Use the buttons below to manage:"
+        f"🧹 *CLEANUP COMPLETE*\n\n"
+        f"Deleted: *{deleted_count}* old posts\n"
+        f"Remaining: *{len(pending) - deleted_count}* pending\n\n"
+        f"Auto-cleanup runs every 4 minutes."
     )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("💳 Update Payment Address", callback_data="admin_update_payment"),
-            InlineKeyboardButton("💰 Update Fee %", callback_data="admin_update_fee")
-        ],
-        [
-            InlineKeyboardButton("👑 Grant Premium", callback_data="admin_grant_premium"),
-            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")
-        ],
-        [
-            InlineKeyboardButton("📊 Refresh Stats", callback_data="admin_panel"),
-            InlineKeyboardButton("« Back to Menu", callback_data="menu")
-        ]
-    ]
-
+    
+    keyboard = [[InlineKeyboardButton("« Back to Admin", callback_data="admin_panel")]]
     await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3815,6 +4006,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         elif query.data == 'admin_broadcast':
             await query.answer("Send broadcast message in format:\n/broadcast Your message here", show_alert=True)
+            return
+        elif query.data == 'admin_list_groups':
+            await admin_list_groups_callback(update, context)
+            return
+        elif query.data == 'admin_cleanup_now':
+            await admin_cleanup_now_callback(update, context)
             return
 
     handlers = {
@@ -4032,10 +4229,10 @@ async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TY
                 f"👋 Hello! I'm the *Base Fair Launch Sniper Bot*\n\n"
                 f"✨ I will automatically post new token launches here!\n\n"
                 f"🔍 *What I do:*\n"
-                f"• Scan ALL new token launches on Base chain\n"
+                f"• Scan ALL new token launches on Base + Monad chains\n"
                 f"• Post with safety score & market data\n"
-                f"• Auto-delete posts after 5 minutes\n"
-                f"• Cooldown: 3 posts, then 5 min pause\n\n"
+                f"• Auto-delete old posts every 4 minutes\n"
+                f"• Keep the group clean automatically\n\n"
                 f"📊 Group ID: `{group_id}` ✅ Registered!\n"
                 f"🔄 Waiting for new fair launches..."
             )
@@ -4192,6 +4389,10 @@ async def main():
     app.add_handler(CommandHandler("earnings", earnings_command))
     app.add_handler(CommandHandler("advertise", advertise_command))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("setpayment", admin_setpayment))
+    app.add_handler(CommandHandler("setfee", admin_setfee))
+    app.add_handler(CommandHandler("grantpremium", admin_grantpremium))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Handle text messages (for token address input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input))
@@ -4259,12 +4460,17 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to start payment monitor: {e}")
 
+    # Start periodic cleanup task for old group posts
+    cleanup_task = asyncio.create_task(cleanup_old_group_posts(app))
+    logger.info("🧹 Periodic group post cleanup started (every 4 minutes)")
+
     # Start scanning loop
     try:
         await scan_loop(app)
     except KeyboardInterrupt:
         logger.info("\n👋 Shutting down gracefully...")
     finally:
+        cleanup_task.cancel()
         if payment_monitor_task:
             payment_monitor_task.cancel()
         await app.stop()

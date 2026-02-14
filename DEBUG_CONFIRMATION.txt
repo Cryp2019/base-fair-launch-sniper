@@ -1,0 +1,6 @@
+Debug instructions created at e:/base-fair-launch-sniper/DEBUG_INSTRUCTIONS.md. 
+Please read that file and follow the steps.
+Review logs for 'Files in CWD' after restart.
+Files missing? Check volume mount.
+Files exist? Permission issue.
+Also updated sniper_bot.py to force CWD into sys.path.
