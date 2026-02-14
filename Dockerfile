@@ -20,6 +20,9 @@ COPY project_sponsors.py .
 COPY sponsorship_processor.py .
 COPY performers_tracker.py .
 COPY scoring.py .
+COPY sponsored_projects.py .
+COPY automated_sponsorship.py .
+COPY top_performers.py .
 
 # Create directory for database
 RUN mkdir -p /app/data
