@@ -78,7 +78,7 @@ if os.path.exists('.env'):
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
-# Use Alchemy RPC if key is available, otherwise fall back to public Base RPC
+# Use custom RPC URL, or Alchemy if key provided, or free public RPCs as fallback
 _base_rpc_url = os.getenv('BASE_RPC_URL', '')
 if _base_rpc_url:
     BASE_RPC = _base_rpc_url
@@ -196,8 +196,16 @@ logger.info(f"✅ Database connected: {db.db_path}")
 # Mask the RPC URL for logging (hide API keys)
 logger.info(f"🔗 Base RPC URL: {_mask_rpc_url(BASE_RPC)}")
 
-# Try connecting to Base RPC with retry
-BASE_RPC_FALLBACKS = [BASE_RPC, 'https://mainnet.base.org', 'https://base.llamarpc.com']
+# Try connecting to Base RPC with retry — includes free public RPCs as fallbacks
+BASE_RPC_FALLBACKS = [
+    BASE_RPC,
+    'https://mainnet.base.org',
+    'https://base.llamarpc.com',
+    'https://base-rpc.publicnode.com',
+    'https://base.drpc.org',
+    'https://rpc.ankr.com/base',
+    'https://base.meowrpc.com',
+]
 # Remove duplicates while preserving order
 BASE_RPC_FALLBACKS = list(dict.fromkeys(BASE_RPC_FALLBACKS))
 
@@ -844,44 +852,38 @@ async def check_transfer_limits(token_address: str) -> dict:
     return {'has_limits': False, 'details': 'No limits'}
 
 async def calculate_clog_percentage(token_address: str, pair_address: str) -> float:
-    """Calculate network clog percentage based on recent transactions"""
+    """Calculate network clog percentage based on recent transactions (uses standard RPC)"""
     try:
-        # Get recent transactions for the pair
-        url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "alchemy_getAssetTransfers",
-            "params": [{
-                "fromBlock": "latest",
-                "toBlock": "latest",
-                "contractAddresses": [token_address],
-                "category": ["erc20"],
-                "maxCount": "0x5",
-                "withMetadata": True
-            }]
-        }
-        
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('result', {}).get('transfers', [])
-            
-            if transfers:
-                # Calculate average gas used
-                total_gas = 0
-                count = 0
-                for tx in transfers:
-                    if tx.get('metadata', {}).get('gasUsed'):
-                        total_gas += int(tx['metadata']['gasUsed'], 16)
-                        count += 1
-                
-                if count > 0:
-                    avg_gas = total_gas / count
-                    # Clog percentage: (avg_gas / 300000) * 100
-                    # 300000 is typical max gas for a swap
-                    clog_pct = min((avg_gas / 300000) * 100, 100)
-                    return round(clog_pct, 2)
+        # Use standard eth_getLogs with ERC-20 Transfer event topic (works with any RPC)
+        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+        current_block = w3.eth.block_number
+        from_block = max(0, current_block - 10)
+
+        logs = w3.eth.get_logs({
+            'fromBlock': from_block,
+            'toBlock': 'latest',
+            'address': Web3.to_checksum_address(token_address),
+            'topics': [transfer_topic]
+        })
+
+        if logs:
+            # Get gas used from recent transfer transactions
+            total_gas = 0
+            count = 0
+            for log in logs[:5]:
+                try:
+                    receipt = w3.eth.get_transaction_receipt(log['transactionHash'])
+                    total_gas += receipt['gasUsed']
+                    count += 1
+                except Exception:
+                    continue
+
+            if count > 0:
+                avg_gas = total_gas / count
+                # Clog percentage: (avg_gas / 300000) * 100
+                # 300000 is typical max gas for a swap
+                clog_pct = min((avg_gas / 300000) * 100, 100)
+                return round(clog_pct, 2)
     except Exception as e:
         logger.debug(f"Clog calculation failed: {e}")
     
@@ -890,14 +892,10 @@ async def calculate_clog_percentage(token_address: str, pair_address: str) -> fl
 async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
     """Detect if token has airdrop functionality or recent batch transfers"""
     airdrops = []
-    
-    # Alchemy only supports Base for now
-    if chain != 'base':
-        return []
 
     try:
-        # Check for airdrop-related functions
-        target_w3 = w3
+        # Check for airdrop-related functions (works with any RPC)
+        target_w3 = w3 if chain == 'base' else (w3_monad if chain == 'monad' and w3_monad else w3)
         airdrop_abi = [
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amounts","type":"uint256[]"}],"name":"airdrop","outputs":[],"type":"function"},
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amount","type":"uint256"}],"name":"multiTransfer","outputs":[],"type":"function"},
@@ -912,42 +910,31 @@ async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
         if hasattr(contract.functions, 'multiTransfer'):
             airdrops.append("Multi-transfer function detected")
         
-        # Check recent transactions for batch transfers
-        if chain == 'base' and ALCHEMY_KEY:
-            url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "alchemy_getAssetTransfers",
-                "params": [{
-                    "fromBlock": "latest",
-                    "toBlock": "latest",
-                    "contractAddresses": [token_address],
-                    "category": ["erc20"],
-                    "maxCount": "0xa",
-                    "withMetadata": True
-                }]
-            }
-        
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('result', {}).get('transfers', [])
-            
-            # Group by transaction hash
-            tx_groups = {}
-            for transfer in transfers:
-                tx_hash = transfer.get('hash')
-                if tx_hash:
-                    if tx_hash not in tx_groups:
-                        tx_groups[tx_hash] = 0
-                    tx_groups[tx_hash] += 1
-            
-            # If any transaction has 5+ transfers, it's likely an airdrop
-            for tx_hash, count in tx_groups.items():
-                if count >= 5:
-                    airdrops.append(f"Batch transfer detected ({count} recipients)")
-                    break
+        # Check recent Transfer events for batch transfers (uses standard eth_getLogs — works with any RPC)
+        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+        current_block = target_w3.eth.block_number
+        from_block = max(0, current_block - 10)
+
+        logs = target_w3.eth.get_logs({
+            'fromBlock': from_block,
+            'toBlock': 'latest',
+            'address': Web3.to_checksum_address(token_address),
+            'topics': [transfer_topic]
+        })
+
+        # Group by transaction hash
+        tx_groups = {}
+        for log in logs[:20]:
+            tx_hash = log['transactionHash'].hex()
+            if tx_hash not in tx_groups:
+                tx_groups[tx_hash] = 0
+            tx_groups[tx_hash] += 1
+
+        # If any transaction has 5+ transfers, it's likely an airdrop
+        for tx_hash, count in tx_groups.items():
+            if count >= 5:
+                airdrops.append(f"Batch transfer detected ({count} recipients)")
+                break
     
     except Exception as e:
         logger.debug(f"Airdrop detection failed: {e}")
@@ -4140,8 +4127,8 @@ async def main():
         sys.exit(1)
 
     if not ALCHEMY_KEY:
-        logger.error("❌ Missing ALCHEMY_BASE_KEY! Set it in Railway environment variables.")
-        sys.exit(1)
+        logger.warning("⚠️ ALCHEMY_BASE_KEY not set — using free public RPCs (may have rate limits)")
+        logger.warning("   For best performance, set ALCHEMY_BASE_KEY or BASE_RPC_URL")
 
     logger.info("╔═══════════════════════════════════╗")
     logger.info("   🚀 BASE FAIR LAUNCH SNIPER BOT")

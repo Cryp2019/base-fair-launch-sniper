@@ -33,7 +33,10 @@ except FileNotFoundError:
 
 # ===== CONFIG =====
 _alchemy_key = os.getenv('ALCHEMY_BASE_KEY', '')
-if _alchemy_key:
+_base_rpc_url = os.getenv('BASE_RPC_URL', '')
+if _base_rpc_url:
+    BASE_RPC = _base_rpc_url
+elif _alchemy_key:
     BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{_alchemy_key}"
 else:
     BASE_RPC = 'https://mainnet.base.org'
@@ -52,7 +55,27 @@ MAX_TAX_PERCENT = 5
 
 # Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
+
+# Connect to Base RPC with fallbacks (free public RPCs)
+_base_rpc_fallbacks = [
+    BASE_RPC,
+    'https://mainnet.base.org',
+    'https://base.llamarpc.com',
+    'https://base-rpc.publicnode.com',
+    'https://base.drpc.org',
+]
+w3 = None
+for _rpc in dict.fromkeys(_base_rpc_fallbacks):
+    try:
+        _w3 = Web3(Web3.HTTPProvider(_rpc, request_kwargs={'timeout': 10}))
+        if _w3.is_connected():
+            w3 = _w3
+            logging.info(f"✅ Connected to Base RPC: {_rpc[:40]}...")
+            break
+    except Exception:
+        continue
+if w3 is None:
+    w3 = Web3(Web3.HTTPProvider(BASE_RPC))
 
 # Minimal ABIs (only what we need)
 ERC20_ABI = [
@@ -83,7 +106,7 @@ def is_renounced(owner_address: str) -> bool:
 def get_creator_address(token_address: str) -> str:
     """Get deployer address with improved reliability"""
     try:
-        # Method 1: Try to get contract creation transaction via Basescan API
+        # Method 1: Try to get contract creation transaction via Basescan API (free)
         basescan_key = os.getenv('BASESCAN_API_KEY', '')
         if basescan_key:
             url = f"https://api.basescan.org/api?module=contract&action=getcontractcreation&contractaddresses={token_address}&apikey={basescan_key}"
@@ -93,24 +116,22 @@ def get_creator_address(token_address: str) -> str:
                 if data.get('status') == '1' and data.get('result'):
                     return data['result'][0]['contractCreator']
         
-        # Method 2: Fallback to Alchemy transfers (original method)
-        url = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}/getAssetTransfers"
-        payload = {
-            "fromBlock": "0x0",
-            "toBlock": "latest",
-            "contractAddresses": [token_address],
-            "category": ["external", "erc20"],
-            "withMetadata": True,
-            "excludeZeroValue": True,
-            "maxCount": "0x5"  # Get first 5 to find earliest
-        }
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('transfers', [])
-            if transfers:
-                # Return the earliest transfer's sender
-                return transfers[-1]['from']
+        # Method 2: Fallback using standard eth_getLogs to find first Transfer event (works with any RPC)
+        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+        # Zero address as sender = token minting (contract creation)
+        zero_address_topic = '0x0000000000000000000000000000000000000000000000000000000000000000'
+        logs = w3.eth.get_logs({
+            'fromBlock': 0,
+            'toBlock': 'latest',
+            'address': Web3.to_checksum_address(token_address),
+            'topics': [transfer_topic, zero_address_topic],
+        })
+        if logs:
+            # The first mint's 'to' address is likely the deployer
+            first_mint = logs[0]
+            # 'to' is the 3rd topic (index 2), padded to 32 bytes
+            to_address = '0x' + first_mint['topics'][2].hex()[-40:]
+            return Web3.to_checksum_address(to_address)
     except Exception as e:
         logging.warning(f"Failed to get creator: {e}")
     return None
@@ -415,10 +436,9 @@ def get_new_pairs(last_block: int = None) -> list:
     except Exception as e:
         logging.error(f"Failed to fetch pairs: {e}")
         
-        # Fallback to simpler method if eth_getLogs fails
+        # Fallback: retry via JSON-RPC POST to the configured BASE_RPC (works with any provider)
         try:
-            logging.info("Falling back to Alchemy asset transfers...")
-            url = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}"
+            logging.info("Retrying eth_getLogs via JSON-RPC POST...")
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -430,7 +450,7 @@ def get_new_pairs(last_block: int = None) -> list:
                     "topics": [pool_created_topic]
                 }]
             }
-            resp = requests.post(url, json=payload, timeout=15)
+            resp = requests.post(BASE_RPC, json=payload, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 if 'result' in data:
@@ -552,7 +572,7 @@ async def scan_command(update: Update, context: CallbackContext):
 async def main():
     # Debug: Print loaded env vars
     logging.info(f"Telegram Token loaded: {'Yes' if TELEGRAM_TOKEN else 'No'}")
-    logging.info(f"Alchemy Key loaded: {'Yes' if os.getenv('ALCHEMY_BASE_KEY') else 'No'}")
+    logging.info(f"RPC Provider: {'Alchemy' if os.getenv('ALCHEMY_BASE_KEY') else 'Free public RPC'}")
     
     # Scan-only mode (for GitHub Actions)
     if '--scan-only' in sys.argv:
