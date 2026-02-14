@@ -125,9 +125,9 @@ def get_creator_address(token_address: str) -> str:
                     return data['result'][0]['contractCreator']
         
         # Method 2: Fallback using standard eth_getLogs to find first Transfer event (works with any RPC)
-        # Search recent blocks to find earliest mint (zero address → deployer)
+        # Search recent blocks to find earliest mint (zero address → recipient)
         current_block = w3.eth.block_number
-        # Search last ~100k blocks (~2 days on Base) to avoid huge range queries on free RPCs
+        # Search last ~100k blocks (~2.3 days on Base at ~2s/block) to avoid huge range queries on free RPCs
         from_block = max(0, current_block - 100000)
         logs = w3.eth.get_logs({
             'fromBlock': from_block,
@@ -136,7 +136,7 @@ def get_creator_address(token_address: str) -> str:
             'topics': [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
         })
         if logs:
-            # The first mint's 'to' address is likely the deployer
+            # The first mint recipient is typically the deployer/creator who received initial supply
             first_mint = logs[0]
             # 'to' is the 3rd topic (index 2), padded to 32 bytes
             to_address = '0x' + first_mint['topics'][2].hex()[-40:]
