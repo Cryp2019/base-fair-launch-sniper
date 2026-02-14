@@ -78,8 +78,17 @@ if os.path.exists('.env'):
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
-# Use public Base RPC by default (no rate limits), fall back to Alchemy if BASE_RPC_URL is explicitly set to Alchemy
-BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
+INFURA_KEY = os.getenv('INFURA_KEY', '')  # Infura (cheaper alternative to Alchemy)
+# Use custom RPC URL, or Infura/Alchemy if key provided, or free public RPCs as fallback
+_base_rpc_url = os.getenv('BASE_RPC_URL', '')
+if _base_rpc_url:
+    BASE_RPC = _base_rpc_url
+elif INFURA_KEY:
+    BASE_RPC = f"https://base-mainnet.infura.io/v3/{INFURA_KEY}"
+elif ALCHEMY_KEY:
+    BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+else:
+    BASE_RPC = 'https://mainnet.base.org'
 
 # Monad chain RPC
 MONAD_RPC = os.getenv('MONAD_RPC_URL', 'https://rpc.monad.xyz')
@@ -103,6 +112,11 @@ AD_TIERS = {
 # Base chain addresses
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
+
+# Standard ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+TRANSFER_EVENT_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+# Zero address topic (used to detect token minting)
+ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
 # Multi-DEX Factory Configuration
 FACTORIES = {
@@ -176,16 +190,56 @@ MONAD_FACTORIES = {
 # Keep old FACTORY_ADDRESS for backward compatibility
 FACTORY_ADDRESS = FACTORIES['uniswap_v3']['address']
 
+def _mask_rpc_url(url):
+    """Mask API keys in RPC URLs for safe logging"""
+    if ALCHEMY_KEY and len(ALCHEMY_KEY) > 8 and ALCHEMY_KEY in url:
+        return url.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
+    if INFURA_KEY and len(INFURA_KEY) > 8 and INFURA_KEY in url:
+        return url.replace(INFURA_KEY, INFURA_KEY[:4] + '...' + INFURA_KEY[-4:])
+    return url
+
 # Initialize
 logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
 db = UserDatabase()
 logger.info(f"✅ Database connected: {db.db_path}")
 
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-if w3.is_connected():
-    logger.info(f"✅ Connected to Base RPC")
-else:
-    logger.error(f"❌ Failed to connect to Base RPC!")
+# Mask the RPC URL for logging (hide API keys)
+logger.info(f"🔗 Base RPC URL: {_mask_rpc_url(BASE_RPC)}")
+
+# Try connecting to Base RPC with retry — includes both Infura/Alchemy + free public RPCs as fallbacks
+BASE_RPC_FALLBACKS = [BASE_RPC]
+# Include Infura and Alchemy endpoints if their keys are set (duplicates removed below)
+if INFURA_KEY:
+    BASE_RPC_FALLBACKS.append(f"https://base-mainnet.infura.io/v3/{INFURA_KEY}")
+if ALCHEMY_KEY:
+    BASE_RPC_FALLBACKS.append(f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}")
+BASE_RPC_FALLBACKS += [
+    'https://mainnet.base.org',
+    'https://base.llamarpc.com',
+    'https://base-rpc.publicnode.com',
+    'https://base.drpc.org',
+    'https://rpc.ankr.com/base',
+    'https://base.meowrpc.com',
+]
+# Remove duplicates while preserving order
+BASE_RPC_FALLBACKS = list(dict.fromkeys(BASE_RPC_FALLBACKS))
+
+w3 = None
+for rpc_url in BASE_RPC_FALLBACKS:
+    try:
+        _w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
+        if _w3.is_connected():
+            w3 = _w3
+            logger.info(f"✅ Connected to Base RPC: {_mask_rpc_url(rpc_url)}")
+            break
+        else:
+            logger.warning(f"⚠️ Base RPC not responding: {rpc_url[:40]}...")
+    except Exception as e:
+        logger.warning(f"⚠️ Base RPC connection failed for {rpc_url[:40]}...: {e}")
+
+if w3 is None:
+    logger.error("❌ Failed to connect to any Base RPC! Using default (may fail at runtime)")
+    w3 = Web3(Web3.HTTPProvider(BASE_RPC, request_kwargs={'timeout': 10}))
 
 # Monad Web3 connection
 w3_monad = None
@@ -401,8 +455,6 @@ def get_new_pairs(last_block: int = None) -> list:
     # Alchemy free tier limits eth_getLogs to 10 block range
     current_block = w3.eth.block_number
     to_block = min(last_block + 10, current_block)
-    from_block_hex = hex(last_block)
-    to_block_hex = hex(to_block)
 
     # Scan each enabled DEX factory
     for dex_id, config in FACTORIES.items():
@@ -411,8 +463,8 @@ def get_new_pairs(last_block: int = None) -> list:
             
         try:
             logs = w3.eth.get_logs({
-                'fromBlock': from_block_hex,
-                'toBlock': to_block_hex,
+                'fromBlock': last_block,
+                'toBlock': to_block,
                 'address': Web3.to_checksum_address(config['address']),
                 'topics': [config['event_topic']]
             })
@@ -449,8 +501,6 @@ def get_new_pairs_monad(last_block: int = None) -> list:
         all_pools = []
         current_block = w3_monad.eth.block_number
         to_block = min(last_block + 50, current_block)  # Monad is fast, scan wider range
-        from_block_hex = hex(last_block)
-        to_block_hex = hex(to_block)
 
         for dex_id, config in MONAD_FACTORIES.items():
             if not config.get('enabled', True):
@@ -458,8 +508,8 @@ def get_new_pairs_monad(last_block: int = None) -> list:
                 
             try:
                 logs = w3_monad.eth.get_logs({
-                    'fromBlock': from_block_hex,
-                    'toBlock': to_block_hex,
+                    'fromBlock': last_block,
+                    'toBlock': to_block,
                     'address': Web3.to_checksum_address(config['address']),
                     'topics': [config['event_topic']]
                 })
@@ -569,8 +619,7 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         # Fallback: check which one is the "base" token by checking common stable/native wrappers
         known_bases = [USDC_ADDRESS, WETH_ADDRESS]
         if chain == 'monad':
-            known_bases = ['0x760AfE86e5de5fa0Ee542fc7721795a146203f9e', '0xf5C6825015280CdfD0b56903F9F8B5A22193906F'] # WMON, USDC (from top of file)
-            # Make sure we use the ones defined at top of file if possible, hardcoding for now based on previous edits
+            known_bases = [MONAD_WETH_ADDRESS, MONAD_USDC_ADDRESS]
             
         contract0 = target_w3.eth.contract(address=token0, abi=ERC20_ABI)
         try:
@@ -636,7 +685,7 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         if premium_analytics:
             try:
                 # Get liquidity in the pool
-                base_contract = w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
+                base_contract = target_w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
                 liquidity_balance = base_contract.functions.balanceOf(pair_address).call()
                 base_decimals = base_contract.functions.decimals().call()
                 liquidity_formatted = liquidity_balance / (10 ** base_decimals)
@@ -818,44 +867,37 @@ async def check_transfer_limits(token_address: str) -> dict:
     return {'has_limits': False, 'details': 'No limits'}
 
 async def calculate_clog_percentage(token_address: str, pair_address: str) -> float:
-    """Calculate network clog percentage based on recent transactions"""
+    """Calculate network clog percentage based on recent transactions (uses standard RPC)"""
     try:
-        # Get recent transactions for the pair
-        url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "alchemy_getAssetTransfers",
-            "params": [{
-                "fromBlock": "latest",
-                "toBlock": "latest",
-                "contractAddresses": [token_address],
-                "category": ["erc20"],
-                "maxCount": "0x5",
-                "withMetadata": True
-            }]
-        }
-        
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('result', {}).get('transfers', [])
-            
-            if transfers:
-                # Calculate average gas used
-                total_gas = 0
-                count = 0
-                for tx in transfers:
-                    if tx.get('metadata', {}).get('gasUsed'):
-                        total_gas += int(tx['metadata']['gasUsed'], 16)
-                        count += 1
-                
-                if count > 0:
-                    avg_gas = total_gas / count
-                    # Clog percentage: (avg_gas / 300000) * 100
-                    # 300000 is typical max gas for a swap
-                    clog_pct = min((avg_gas / 300000) * 100, 100)
-                    return round(clog_pct, 2)
+        # Use standard eth_getLogs with ERC-20 Transfer event topic (works with any RPC)
+        current_block = w3.eth.block_number
+        from_block = max(0, current_block - 10)
+
+        logs = w3.eth.get_logs({
+            'fromBlock': from_block,
+            'toBlock': 'latest',
+            'address': Web3.to_checksum_address(token_address),
+            'topics': [TRANSFER_EVENT_TOPIC]
+        })
+
+        if logs:
+            # Get gas used from recent transfer transactions
+            total_gas = 0
+            count = 0
+            for log in logs[:5]:
+                try:
+                    receipt = w3.eth.get_transaction_receipt(log['transactionHash'])
+                    total_gas += receipt['gasUsed']
+                    count += 1
+                except Exception:
+                    continue
+
+            if count > 0:
+                avg_gas = total_gas / count
+                # Clog percentage: (avg_gas / 300000) * 100
+                # 300000 is typical max gas for a swap
+                clog_pct = min((avg_gas / 300000) * 100, 100)
+                return round(clog_pct, 2)
     except Exception as e:
         logger.debug(f"Clog calculation failed: {e}")
     
@@ -864,14 +906,10 @@ async def calculate_clog_percentage(token_address: str, pair_address: str) -> fl
 async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
     """Detect if token has airdrop functionality or recent batch transfers"""
     airdrops = []
-    
-    # Alchemy only supports Base for now
-    if chain != 'base':
-        return []
 
     try:
-        # Check for airdrop-related functions
-        target_w3 = w3
+        # Check for airdrop-related functions (works with any RPC)
+        target_w3 = w3 if chain == 'base' else (w3_monad if chain == 'monad' and w3_monad else w3)
         airdrop_abi = [
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amounts","type":"uint256[]"}],"name":"airdrop","outputs":[],"type":"function"},
             {"constant":False,"inputs":[{"name":"recipients","type":"address[]"},{"name":"amount","type":"uint256"}],"name":"multiTransfer","outputs":[],"type":"function"},
@@ -886,42 +924,30 @@ async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
         if hasattr(contract.functions, 'multiTransfer'):
             airdrops.append("Multi-transfer function detected")
         
-        # Check recent transactions for batch transfers
-        if chain == 'base' and ALCHEMY_KEY:
-            url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "alchemy_getAssetTransfers",
-                "params": [{
-                    "fromBlock": "latest",
-                    "toBlock": "latest",
-                    "contractAddresses": [token_address],
-                    "category": ["erc20"],
-                    "maxCount": "0xa",
-                    "withMetadata": True
-                }]
-            }
-        
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            transfers = data.get('result', {}).get('transfers', [])
-            
-            # Group by transaction hash
-            tx_groups = {}
-            for transfer in transfers:
-                tx_hash = transfer.get('hash')
-                if tx_hash:
-                    if tx_hash not in tx_groups:
-                        tx_groups[tx_hash] = 0
-                    tx_groups[tx_hash] += 1
-            
-            # If any transaction has 5+ transfers, it's likely an airdrop
-            for tx_hash, count in tx_groups.items():
-                if count >= 5:
-                    airdrops.append(f"Batch transfer detected ({count} recipients)")
-                    break
+        # Check recent Transfer events for batch transfers (uses standard eth_getLogs — works with any RPC)
+        current_block = target_w3.eth.block_number
+        from_block = max(0, current_block - 10)
+
+        logs = target_w3.eth.get_logs({
+            'fromBlock': from_block,
+            'toBlock': 'latest',
+            'address': Web3.to_checksum_address(token_address),
+            'topics': [TRANSFER_EVENT_TOPIC]
+        })
+
+        # Group by transaction hash
+        tx_groups = {}
+        for log in logs[:20]:
+            tx_hash = log['transactionHash'].hex()
+            if tx_hash not in tx_groups:
+                tx_groups[tx_hash] = 0
+            tx_groups[tx_hash] += 1
+
+        # If any transaction has 5+ transfers, it's likely an airdrop
+        for tx_hash, count in tx_groups.items():
+            if count >= 5:
+                airdrops.append(f"Batch transfer detected ({count} recipients)")
+                break
     
     except Exception as e:
         logger.debug(f"Airdrop detection failed: {e}")
@@ -1677,7 +1703,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"1️⃣ Send the exact ETH amount to:\n"
             f"`{wallet_display}`\n\n"
             f"2️⃣ After sending, use:\n"
-            f"/advertise <contract\_address> <tx\_hash>\n\n"
+            f"/advertise <contract\\_address> <tx\\_hash>\n\n"
             f"3️⃣ Bot verifies payment automatically\n"
             f"4️⃣ Your project gets ⭐ SPONSORED badge!\n\n"
             f"🚀 *Reach 1000s of active Base traders today!*"
@@ -3927,8 +3953,8 @@ async def scan_loop(app: Application):
             # Combine all pairs
             all_pairs = pairs + monad_pairs
             
-            # Log scanning activity every 10 scans (~100 seconds)
-            if scan_count % 10 == 0:
+            # Log scanning activity on first scan and every 10 scans (~100 seconds)
+            if scan_count == 1 or scan_count % 10 == 0:
                 current_block = w3.eth.block_number
                 monad_info = ""
                 if w3_monad and last_block_monad:
@@ -4110,12 +4136,12 @@ async def on_bot_removed_from_group(update: Update, context: ContextTypes.DEFAUL
 async def main():
     """Start the bot"""
     if not TELEGRAM_TOKEN:
-        logger.error("❌ Missing TELEGRAM_BOT_TOKEN in .env!")
-        return
+        logger.error("❌ Missing TELEGRAM_BOT_TOKEN! Set it in Railway environment variables.")
+        sys.exit(1)
 
-    if not ALCHEMY_KEY:
-        logger.error("❌ Missing ALCHEMY_BASE_KEY in .env!")
-        return
+    if not ALCHEMY_KEY and not INFURA_KEY and not _base_rpc_url:
+        logger.warning("⚠️ No RPC key set — using free public RPCs (may have rate limits)")
+        logger.warning("   For best performance, set INFURA_KEY, ALCHEMY_BASE_KEY, or BASE_RPC_URL")
 
     logger.info("╔═══════════════════════════════════╗")
     logger.info("   🚀 BASE FAIR LAUNCH SNIPER BOT")
@@ -4128,8 +4154,9 @@ async def main():
         block = w3.eth.block_number
         logger.info(f"✅ Connected to Base (Block: {block:,})")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to Base: {e}")
-        return
+        logger.error(f"❌ Failed to connect to Base RPC: {e}")
+        logger.error("Check your ALCHEMY_BASE_KEY or BASE_RPC_URL environment variable.")
+        sys.exit(1)
 
     # Create application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
