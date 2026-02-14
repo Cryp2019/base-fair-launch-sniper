@@ -206,9 +206,14 @@ logger.info(f"✅ Database connected: {db.db_path}")
 # Mask the RPC URL for logging (hide API keys)
 logger.info(f"🔗 Base RPC URL: {_mask_rpc_url(BASE_RPC)}")
 
-# Try connecting to Base RPC with retry — includes free public RPCs as fallbacks
-BASE_RPC_FALLBACKS = [
-    BASE_RPC,
+# Try connecting to Base RPC with retry — includes both Infura/Alchemy + free public RPCs as fallbacks
+BASE_RPC_FALLBACKS = [BASE_RPC]
+# Include both Infura and Alchemy endpoints when both keys are set
+if INFURA_KEY:
+    BASE_RPC_FALLBACKS.append(f"https://base-mainnet.infura.io/v3/{INFURA_KEY}")
+if ALCHEMY_KEY:
+    BASE_RPC_FALLBACKS.append(f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}")
+BASE_RPC_FALLBACKS += [
     'https://mainnet.base.org',
     'https://base.llamarpc.com',
     'https://base-rpc.publicnode.com',

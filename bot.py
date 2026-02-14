@@ -64,9 +64,13 @@ ZERO_ADDRESS_TOPIC = '0x00000000000000000000000000000000000000000000000000000000
 # Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Connect to Base RPC with fallbacks (free public RPCs)
-_base_rpc_fallbacks = [
-    BASE_RPC,
+# Connect to Base RPC with fallbacks — include both Infura/Alchemy + free public RPCs
+_base_rpc_fallbacks = [BASE_RPC]
+if _infura_key:
+    _base_rpc_fallbacks.append(f"https://base-mainnet.infura.io/v3/{_infura_key}")
+if _alchemy_key:
+    _base_rpc_fallbacks.append(f"https://base-mainnet.g.alchemy.com/v2/{_alchemy_key}")
+_base_rpc_fallbacks += [
     'https://mainnet.base.org',
     'https://base.llamarpc.com',
     'https://base-rpc.publicnode.com',
