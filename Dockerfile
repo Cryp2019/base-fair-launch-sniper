@@ -13,6 +13,16 @@ COPY trading.py .
 COPY security_scanner.py .
 COPY admin.py .
 COPY payment_monitor.py .
+COPY encryption_utils.py .
+COPY group_poster.py .
+COPY onchain_analyzer.py .
+COPY project_sponsors.py .
+COPY sponsorship_processor.py .
+COPY performers_tracker.py .
+COPY scoring.py .
+COPY sponsored_projects.py .
+COPY automated_sponsorship.py .
+COPY top_performers.py .
 
 # Create directory for database
 RUN mkdir -p /app/data
