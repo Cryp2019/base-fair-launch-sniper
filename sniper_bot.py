@@ -208,7 +208,7 @@ logger.info(f"🔗 Base RPC URL: {_mask_rpc_url(BASE_RPC)}")
 
 # Try connecting to Base RPC with retry — includes both Infura/Alchemy + free public RPCs as fallbacks
 BASE_RPC_FALLBACKS = [BASE_RPC]
-# Include both Infura and Alchemy endpoints when both keys are set
+# Include Infura and Alchemy endpoints if their keys are set (duplicates removed below)
 if INFURA_KEY:
     BASE_RPC_FALLBACKS.append(f"https://base-mainnet.infura.io/v3/{INFURA_KEY}")
 if ALCHEMY_KEY:

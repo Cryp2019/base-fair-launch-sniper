@@ -66,6 +66,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Connect to Base RPC with fallbacks — include both Infura/Alchemy + free public RPCs
 _base_rpc_fallbacks = [BASE_RPC]
+# Include Infura and Alchemy endpoints if their keys are set (duplicates removed by dict.fromkeys below)
 if _infura_key:
     _base_rpc_fallbacks.append(f"https://base-mainnet.infura.io/v3/{_infura_key}")
 if _alchemy_key:
