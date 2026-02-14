@@ -182,16 +182,19 @@ MONAD_FACTORIES = {
 # Keep old FACTORY_ADDRESS for backward compatibility
 FACTORY_ADDRESS = FACTORIES['uniswap_v3']['address']
 
+def _mask_rpc_url(url):
+    """Mask API keys in RPC URLs for safe logging"""
+    if ALCHEMY_KEY and len(ALCHEMY_KEY) > 8 and ALCHEMY_KEY in url:
+        return url.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
+    return url
+
 # Initialize
 logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
 db = UserDatabase()
 logger.info(f"✅ Database connected: {db.db_path}")
 
 # Mask the RPC URL for logging (hide API keys)
-_rpc_display = BASE_RPC
-if ALCHEMY_KEY and ALCHEMY_KEY in _rpc_display:
-    _rpc_display = _rpc_display.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
-logger.info(f"🔗 Base RPC URL: {_rpc_display}")
+logger.info(f"🔗 Base RPC URL: {_mask_rpc_url(BASE_RPC)}")
 
 # Try connecting to Base RPC with retry
 BASE_RPC_FALLBACKS = [BASE_RPC, 'https://mainnet.base.org', 'https://base.llamarpc.com']
@@ -204,10 +207,7 @@ for rpc_url in BASE_RPC_FALLBACKS:
         _w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
         if _w3.is_connected():
             w3 = _w3
-            _display = rpc_url
-            if ALCHEMY_KEY and ALCHEMY_KEY in _display:
-                _display = _display.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
-            logger.info(f"✅ Connected to Base RPC: {_display}")
+            logger.info(f"✅ Connected to Base RPC: {_mask_rpc_url(rpc_url)}")
             break
         else:
             logger.warning(f"⚠️ Base RPC not responding: {rpc_url[:40]}...")
