@@ -432,8 +432,6 @@ def get_new_pairs(last_block: int = None) -> list:
     # Alchemy free tier limits eth_getLogs to 10 block range
     current_block = w3.eth.block_number
     to_block = min(last_block + 10, current_block)
-    from_block_hex = hex(last_block)
-    to_block_hex = hex(to_block)
 
     # Scan each enabled DEX factory
     for dex_id, config in FACTORIES.items():
@@ -442,8 +440,8 @@ def get_new_pairs(last_block: int = None) -> list:
             
         try:
             logs = w3.eth.get_logs({
-                'fromBlock': from_block_hex,
-                'toBlock': to_block_hex,
+                'fromBlock': last_block,
+                'toBlock': to_block,
                 'address': Web3.to_checksum_address(config['address']),
                 'topics': [config['event_topic']]
             })
@@ -480,8 +478,6 @@ def get_new_pairs_monad(last_block: int = None) -> list:
         all_pools = []
         current_block = w3_monad.eth.block_number
         to_block = min(last_block + 50, current_block)  # Monad is fast, scan wider range
-        from_block_hex = hex(last_block)
-        to_block_hex = hex(to_block)
 
         for dex_id, config in MONAD_FACTORIES.items():
             if not config.get('enabled', True):
@@ -489,8 +485,8 @@ def get_new_pairs_monad(last_block: int = None) -> list:
                 
             try:
                 logs = w3_monad.eth.get_logs({
-                    'fromBlock': from_block_hex,
-                    'toBlock': to_block_hex,
+                    'fromBlock': last_block,
+                    'toBlock': to_block,
                     'address': Web3.to_checksum_address(config['address']),
                     'topics': [config['event_topic']]
                 })
@@ -600,8 +596,7 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         # Fallback: check which one is the "base" token by checking common stable/native wrappers
         known_bases = [USDC_ADDRESS, WETH_ADDRESS]
         if chain == 'monad':
-            known_bases = ['0x760AfE86e5de5fa0Ee542fc7721795a146203f9e', '0xf5C6825015280CdfD0b56903F9F8B5A22193906F'] # WMON, USDC (from top of file)
-            # Make sure we use the ones defined at top of file if possible, hardcoding for now based on previous edits
+            known_bases = [MONAD_WETH_ADDRESS, MONAD_USDC_ADDRESS]
             
         contract0 = target_w3.eth.contract(address=token0, abi=ERC20_ABI)
         try:
@@ -667,7 +662,7 @@ def analyze_token(pair_address: str, token0: str, token1: str, premium_analytics
         if premium_analytics:
             try:
                 # Get liquidity in the pool
-                base_contract = w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
+                base_contract = target_w3.eth.contract(address=base_token_address, abi=ERC20_ABI)
                 liquidity_balance = base_contract.functions.balanceOf(pair_address).call()
                 base_decimals = base_contract.functions.decimals().call()
                 liquidity_formatted = liquidity_balance / (10 ** base_decimals)
@@ -1708,7 +1703,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"1️⃣ Send the exact ETH amount to:\n"
             f"`{wallet_display}`\n\n"
             f"2️⃣ After sending, use:\n"
-            f"/advertise <contract\_address> <tx\_hash>\n\n"
+            f"/advertise <contract\\_address> <tx\\_hash>\n\n"
             f"3️⃣ Bot verifies payment automatically\n"
             f"4️⃣ Your project gets ⭐ SPONSORED badge!\n\n"
             f"🚀 *Reach 1000s of active Base traders today!*"
@@ -3958,8 +3953,8 @@ async def scan_loop(app: Application):
             # Combine all pairs
             all_pairs = pairs + monad_pairs
             
-            # Log scanning activity every 10 scans (~100 seconds)
-            if scan_count % 10 == 0:
+            # Log scanning activity on first scan and every 10 scans (~100 seconds)
+            if scan_count == 1 or scan_count % 10 == 0:
                 current_block = w3.eth.block_number
                 monad_info = ""
                 if w3_monad and last_block_monad:
@@ -4141,12 +4136,12 @@ async def on_bot_removed_from_group(update: Update, context: ContextTypes.DEFAUL
 async def main():
     """Start the bot"""
     if not TELEGRAM_TOKEN:
-        logger.error("❌ Missing TELEGRAM_BOT_TOKEN in .env!")
-        return
+        logger.error("❌ Missing TELEGRAM_BOT_TOKEN! Set it in Railway environment variables.")
+        sys.exit(1)
 
     if not ALCHEMY_KEY:
-        logger.error("❌ Missing ALCHEMY_BASE_KEY in .env!")
-        return
+        logger.error("❌ Missing ALCHEMY_BASE_KEY! Set it in Railway environment variables.")
+        sys.exit(1)
 
     logger.info("╔═══════════════════════════════════╗")
     logger.info("   🚀 BASE FAIR LAUNCH SNIPER BOT")
@@ -4159,8 +4154,9 @@ async def main():
         block = w3.eth.block_number
         logger.info(f"✅ Connected to Base (Block: {block:,})")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to Base: {e}")
-        return
+        logger.error(f"❌ Failed to connect to Base RPC: {e}")
+        logger.error("Check your ALCHEMY_BASE_KEY or BASE_RPC_URL environment variable.")
+        sys.exit(1)
 
     # Create application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
