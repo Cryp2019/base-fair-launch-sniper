@@ -243,6 +243,16 @@ try:
     )
     check("Wallet created", wallet_result['success'])
 
+    # Verify wallet access log entry was created by _log_wallet_access
+    import sqlite3 as _sqlite3
+    _conn = _sqlite3.connect(tmp_db_path)
+    _cur = _conn.cursor()
+    _cur.execute("SELECT user_id, wallet_address, action FROM wallet_access_log WHERE user_id = 12345")
+    _log_row = _cur.fetchone()
+    _conn.close()
+    check("Wallet access log recorded", _log_row is not None)
+    check("Wallet access log action is 'created'", _log_row is not None and _log_row[2] == 'created')
+
     wallets = db.get_user_wallets(12345)
     check("Wallet retrieved for user", len(wallets) == 1)
     check("Wallet address stored", wallets[0]['wallet_address'] == "0xTestWalletAddress123")
@@ -285,7 +295,11 @@ try:
 
     # Mark user traded and check premium upgrade
     # Add 10 referred users who trade to trigger premium upgrade
-    db.update_tier(12345, 'free')  # Reset to free
+    user_before = db.get_user(12345)
+    check("Tier is premium before reset", user_before['tier'] == 'premium')
+    db.update_tier(12345, 'free')  # Reset to free for test
+    user_reset = db.get_user(12345)
+    check("Tier reset to free", user_reset['tier'] == 'free')
     for i in range(10):
         uid = 100000 + i
         db.add_user(user_id=uid, username=f"ref_{i}", referrer_code="BASE12345")
@@ -553,18 +567,22 @@ large_metrics = {'market_cap': 5000000, 'liquidity_usd': 2000000, 'volume_24h': 
 large_msg = format_premium_token_alert(token_data, analysis_data, large_metrics)
 check("Large numbers formatted as millions", "$5.0M" in large_msg or "$2.0M" in large_msg)
 
-# Risk color coding
+# Risk color coding — exact boundary tests
 score_85_data = {**analysis_data, 'security_score': 85}
 msg_85 = format_premium_token_alert(token_data, score_85_data, metrics_data)
-check("Score 85+ shows green 🟢", "🟢" in msg_85)
+check("Score 85 (boundary) shows green 🟢", "🟢" in msg_85)
+
+score_84_data = {**analysis_data, 'security_score': 84}
+msg_84 = format_premium_token_alert(token_data, score_84_data, metrics_data)
+check("Score 84 (boundary) shows yellow 🟡", "🟡" in msg_84)
 
 score_70_data = {**analysis_data, 'security_score': 70}
 msg_70 = format_premium_token_alert(token_data, score_70_data, metrics_data)
-check("Score 70-84 shows yellow 🟡", "🟡" in msg_70)
+check("Score 70 (boundary) shows yellow 🟡", "🟡" in msg_70)
 
-score_50_data = {**analysis_data, 'security_score': 50}
-msg_50 = format_premium_token_alert(token_data, score_50_data, metrics_data)
-check("Score <70 shows red 🔴", "🔴" in msg_50)
+score_69_data = {**analysis_data, 'security_score': 69}
+msg_69 = format_premium_token_alert(token_data, score_69_data, metrics_data)
+check("Score 69 (boundary) shows red 🔴", "🔴" in msg_69)
 
 print()
 
@@ -612,8 +630,9 @@ check("Different user IDs produce different ciphertext", encrypted != encrypted_
 try:
     wrong_decrypt = decrypt_private_key(encrypted, 11111, master_key)
     check("Wrong user ID fails to decrypt", wrong_decrypt != test_private_key)
-except Exception:
-    check("Wrong user ID fails to decrypt (exception raised)", True)
+except (ValueError, Exception) as e:
+    # Fernet raises InvalidToken (subclass of Exception) on wrong key
+    check("Wrong user ID fails to decrypt (InvalidToken raised)", True)
 
 # User cipher creation
 cipher = get_user_cipher(test_user_id, master_key)
