@@ -110,6 +110,11 @@ AD_TIERS = {
 USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".lower()
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006".lower()
 
+# Standard ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+TRANSFER_EVENT_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+# Zero address topic (used to detect token minting)
+ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000'
+
 # Multi-DEX Factory Configuration
 FACTORIES = {
     'uniswap_v3': {
@@ -855,7 +860,6 @@ async def calculate_clog_percentage(token_address: str, pair_address: str) -> fl
     """Calculate network clog percentage based on recent transactions (uses standard RPC)"""
     try:
         # Use standard eth_getLogs with ERC-20 Transfer event topic (works with any RPC)
-        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
         current_block = w3.eth.block_number
         from_block = max(0, current_block - 10)
 
@@ -863,7 +867,7 @@ async def calculate_clog_percentage(token_address: str, pair_address: str) -> fl
             'fromBlock': from_block,
             'toBlock': 'latest',
             'address': Web3.to_checksum_address(token_address),
-            'topics': [transfer_topic]
+            'topics': [TRANSFER_EVENT_TOPIC]
         })
 
         if logs:
@@ -911,7 +915,6 @@ async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
             airdrops.append("Multi-transfer function detected")
         
         # Check recent Transfer events for batch transfers (uses standard eth_getLogs — works with any RPC)
-        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
         current_block = target_w3.eth.block_number
         from_block = max(0, current_block - 10)
 
@@ -919,7 +922,7 @@ async def detect_airdrops(token_address: str, chain: str = 'base') -> list:
             'fromBlock': from_block,
             'toBlock': 'latest',
             'address': Web3.to_checksum_address(token_address),
-            'topics': [transfer_topic]
+            'topics': [TRANSFER_EVENT_TOPIC]
         })
 
         # Group by transaction hash

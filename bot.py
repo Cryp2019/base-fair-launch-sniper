@@ -53,6 +53,11 @@ MAX_PREMINE_RATIO = 0.05  # 5% max creator holding
 MIN_LIQUIDITY_LOCK_DAYS = 30
 MAX_TAX_PERCENT = 5
 
+# Standard ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+TRANSFER_EVENT_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+# Zero address topic (used to detect token minting)
+ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000'
+
 # Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -117,14 +122,15 @@ def get_creator_address(token_address: str) -> str:
                     return data['result'][0]['contractCreator']
         
         # Method 2: Fallback using standard eth_getLogs to find first Transfer event (works with any RPC)
-        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-        # Zero address as sender = token minting (contract creation)
-        zero_address_topic = '0x0000000000000000000000000000000000000000000000000000000000000000'
+        # Search recent blocks to find earliest mint (zero address → deployer)
+        current_block = w3.eth.block_number
+        # Search last ~100k blocks (~2 days on Base) to avoid huge range queries on free RPCs
+        from_block = max(0, current_block - 100000)
         logs = w3.eth.get_logs({
-            'fromBlock': 0,
+            'fromBlock': from_block,
             'toBlock': 'latest',
             'address': Web3.to_checksum_address(token_address),
-            'topics': [transfer_topic, zero_address_topic],
+            'topics': [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
         })
         if logs:
             # The first mint's 'to' address is likely the deployer
