@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -31,7 +32,11 @@ except FileNotFoundError:
     pass
 
 # ===== CONFIG =====
-BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEMY_BASE_KEY')}"
+_alchemy_key = os.getenv('ALCHEMY_BASE_KEY', '')
+if _alchemy_key:
+    BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{_alchemy_key}"
+else:
+    BASE_RPC = 'https://mainnet.base.org'
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALERT_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '@base_fair_launch_alerts')  # Public channel
 
@@ -598,5 +603,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    import asyncio
     asyncio.run(main())

@@ -78,8 +78,14 @@ if os.path.exists('.env'):
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
-# Use public Base RPC by default (no rate limits), fall back to Alchemy if BASE_RPC_URL is explicitly set to Alchemy
-BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
+# Use Alchemy RPC if key is available, otherwise fall back to public Base RPC
+_base_rpc_url = os.getenv('BASE_RPC_URL', '')
+if _base_rpc_url:
+    BASE_RPC = _base_rpc_url
+elif ALCHEMY_KEY:
+    BASE_RPC = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+else:
+    BASE_RPC = 'https://mainnet.base.org'
 
 # Monad chain RPC
 MONAD_RPC = os.getenv('MONAD_RPC_URL', 'https://rpc.monad.xyz')
@@ -181,11 +187,36 @@ logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
 db = UserDatabase()
 logger.info(f"✅ Database connected: {db.db_path}")
 
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-if w3.is_connected():
-    logger.info(f"✅ Connected to Base RPC")
-else:
-    logger.error(f"❌ Failed to connect to Base RPC!")
+# Mask the RPC URL for logging (hide API keys)
+_rpc_display = BASE_RPC
+if ALCHEMY_KEY and ALCHEMY_KEY in _rpc_display:
+    _rpc_display = _rpc_display.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
+logger.info(f"🔗 Base RPC URL: {_rpc_display}")
+
+# Try connecting to Base RPC with retry
+BASE_RPC_FALLBACKS = [BASE_RPC, 'https://mainnet.base.org', 'https://base.llamarpc.com']
+# Remove duplicates while preserving order
+BASE_RPC_FALLBACKS = list(dict.fromkeys(BASE_RPC_FALLBACKS))
+
+w3 = None
+for rpc_url in BASE_RPC_FALLBACKS:
+    try:
+        _w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
+        if _w3.is_connected():
+            w3 = _w3
+            _display = rpc_url
+            if ALCHEMY_KEY and ALCHEMY_KEY in _display:
+                _display = _display.replace(ALCHEMY_KEY, ALCHEMY_KEY[:4] + '...' + ALCHEMY_KEY[-4:])
+            logger.info(f"✅ Connected to Base RPC: {_display}")
+            break
+        else:
+            logger.warning(f"⚠️ Base RPC not responding: {rpc_url[:40]}...")
+    except Exception as e:
+        logger.warning(f"⚠️ Base RPC connection failed for {rpc_url[:40]}...: {e}")
+
+if w3 is None:
+    logger.error("❌ Failed to connect to any Base RPC! Using default (may fail at runtime)")
+    w3 = Web3(Web3.HTTPProvider(BASE_RPC, request_kwargs={'timeout': 10}))
 
 # Monad Web3 connection
 w3_monad = None
