@@ -77,10 +77,13 @@ class OnChainAnalyzer:
         """Find the contract deployer address"""
         try:
             token = Web3.to_checksum_address(token_address)
+            current_block = self.w3.eth.block_number
+            # Only search recent blocks (last ~50k) to avoid 503 from huge range queries
+            from_block = max(0, current_block - 50000)
             # The deployer is the 'from' of the first Transfer (mint) from 0x0
             logs = self.w3.eth.get_logs({
-                'fromBlock': '0x0',
-                'toBlock': 'latest',
+                'fromBlock': hex(from_block),
+                'toBlock': hex(current_block),
                 'address': token,
                 'topics': [
                     TRANSFER_TOPIC,

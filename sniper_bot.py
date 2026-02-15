@@ -78,8 +78,23 @@ if os.path.exists('.env'):
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Match Railway variable name
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'base_fair_launch_bot')
 ALCHEMY_KEY = os.getenv('ALCHEMY_BASE_KEY', '')  # Match Railway variable name
-# Use public Base RPC by default (no rate limits), fall back to Alchemy if BASE_RPC_URL is explicitly set to Alchemy
+# Use public Base RPC by default, with automatic fallback
 BASE_RPC = os.getenv('BASE_RPC_URL', 'https://mainnet.base.org')
+
+# Base RPC fallback list (tried in order if primary fails)
+BASE_RPC_FALLBACKS = [
+    'https://mainnet.base.org',
+    'https://base.llamarpc.com',
+    'https://base.drpc.org',
+    'https://base-rpc.publicnode.com',
+    'https://1rpc.io/base',
+    'https://base.meowrpc.com',
+]
+if ALCHEMY_KEY:
+    BASE_RPC_FALLBACKS.insert(0, f'https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}')
+# Ensure primary is first, remove duplicates
+BASE_RPC_FALLBACKS = [BASE_RPC] + [r for r in BASE_RPC_FALLBACKS if r != BASE_RPC]
+_current_base_rpc_index = 0
 
 # Monad chain RPC
 MONAD_RPC = os.getenv('MONAD_RPC_URL', 'https://rpc.monad.xyz')
@@ -181,11 +196,22 @@ logger.info("🚀 Initializing Base Fair Launch Sniper Bot...")
 db = UserDatabase()
 logger.info(f"✅ Database connected: {db.db_path}")
 
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-if w3.is_connected():
-    logger.info(f"✅ Connected to Base RPC")
-else:
-    logger.error(f"❌ Failed to connect to Base RPC!")
+# Try Base RPCs in order until one connects
+w3 = None
+for _rpc_url in BASE_RPC_FALLBACKS:
+    try:
+        _test_w3 = Web3(Web3.HTTPProvider(_rpc_url, request_kwargs={'timeout': 10}))
+        if _test_w3.is_connected():
+            w3 = _test_w3
+            _current_base_rpc_index = BASE_RPC_FALLBACKS.index(_rpc_url)
+            logger.info(f"✅ Connected to Base RPC: {_rpc_url}")
+            break
+    except Exception as e:
+        logger.warning(f"⚠️ Base RPC failed ({_rpc_url}): {e}")
+
+if not w3:
+    logger.error(f"❌ Failed to connect to any Base RPC!")
+    w3 = Web3(Web3.HTTPProvider(BASE_RPC))  # Use primary anyway
 
 # Monad Web3 connection
 w3_monad = None
@@ -228,6 +254,21 @@ onchain_analyzer = OnChainAnalyzer(w3) if ONCHAIN_AVAILABLE else None
 if onchain_analyzer:
     logger.info("✅ On-chain analyzer initialized")
 admin_manager = AdminManager(db, w3)
+
+def _switch_base_rpc():
+    """Switch to next fallback Base RPC when current one fails (503/429)"""
+    global w3, _current_base_rpc_index
+    _current_base_rpc_index = (_current_base_rpc_index + 1) % len(BASE_RPC_FALLBACKS)
+    new_rpc = BASE_RPC_FALLBACKS[_current_base_rpc_index]
+    logger.warning(f"🔄 RPC error detected, switching to fallback: {new_rpc}")
+    try:
+        w3 = Web3(Web3.HTTPProvider(new_rpc, request_kwargs={'timeout': 10}))
+        if w3.is_connected():
+            logger.info(f"✅ Successfully switched to {new_rpc}")
+        else:
+            logger.warning(f"⚠️ Fallback RPC {new_rpc} not responding")
+    except Exception as rpc_err:
+        logger.error(f"Failed to switch RPC: {rpc_err}")
 
 # Initialize group poster if available
 if GROUP_POSTER_AVAILABLE:
@@ -525,6 +566,26 @@ def parse_pair_event(log, dex_type: str, dex_id: str, config: dict) -> dict:
         return None
 
     pair_type = "USDC" if (token0.lower() == USDC_ADDRESS or token1.lower() == USDC_ADDRESS) else "WETH"
+
+    # Filter out invalid/zero pair addresses (e.g. 0x00000000000000000000000000000000002bb2a4)
+    pair_clean = pair_address.lower().replace('0x', '')
+    # Count leading zeros — real addresses don't have 20+ leading zeros
+    leading_zeros = len(pair_clean) - len(pair_clean.lstrip('0'))
+    if leading_zeros > 20:
+        logger.debug(f"Skipping invalid pair address (too many leading zeros): {pair_address}")
+        return None
+
+    # Filter out known base tokens being detected as "new" launches
+    KNOWN_TOKENS = {
+        WETH_ADDRESS, USDC_ADDRESS,
+        '0x50c5725949a6f0c72e6c4a641f24049a917db0cb'.lower(),  # DAI on Base
+        '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca'.lower(),  # USDbC on Base
+        '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22'.lower(),  # cbETH on Base
+    }
+    # Both tokens in the pair are known base tokens — skip
+    if token0.lower() in KNOWN_TOKENS and token1.lower() in KNOWN_TOKENS:
+        logger.debug(f"Skipping pair of known tokens: {token0} / {token1}")
+        return None
 
     return {
         'address': pair_address,
@@ -4199,7 +4260,13 @@ async def scan_loop(app: Application):
             logger.error(f"Error in scan loop: {e}")
             import traceback
             traceback.print_exc()
-            await asyncio.sleep(60)
+            
+            # Auto-failover: if RPC error (503/429), try next fallback
+            error_str = str(e).lower()
+            if '503' in error_str or '429' in error_str or 'service unavailable' in error_str or 'too many requests' in error_str:
+                _switch_base_rpc()
+            
+            await asyncio.sleep(30)
 
 # ===== AUTO GROUP DETECTION HANDLERS =====
 
@@ -4311,8 +4378,7 @@ async def main():
         return
 
     if not ALCHEMY_KEY:
-        logger.error("❌ Missing ALCHEMY_BASE_KEY in .env!")
-        return
+        logger.warning("⚠️ ALCHEMY_BASE_KEY not set - using public RPC (some premium features may be limited)")
 
     logger.info("╔═══════════════════════════════════╗")
     logger.info("   🚀 BASE FAIR LAUNCH SNIPER BOT")
